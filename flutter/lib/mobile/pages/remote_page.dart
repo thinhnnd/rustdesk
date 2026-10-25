@@ -967,7 +967,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         },
         borderRadius: BorderRadius.circular(16),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+          padding: EdgeInsets.symmetric(
+              horizontal: label != null ? 9 : 7, vertical: 6),
           decoration: BoxDecoration(
             color: active ? activeBlue : (bgColor ?? Colors.transparent),
             borderRadius: BorderRadius.circular(16),
@@ -975,14 +976,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: effectiveFg, size: 19),
+              Icon(icon, color: effectiveFg, size: 17),
               if (label != null) ...[
-                const SizedBox(width: 5),
+                const SizedBox(width: 4),
                 Text(
                   label,
                   style: TextStyle(
                     color: effectiveFg,
-                    fontSize: 12.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -995,15 +996,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
     return Positioned(
       top: topInset + 10,
-      left: 12,
-      right: 12,
+      left: 8,
+      right: 8,
       child: Center(
         child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: max(200.0, screenWidth - 24.0)),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
+          constraints: BoxConstraints(maxWidth: max(200.0, screenWidth - 16.0)),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.96),
                 borderRadius: BorderRadius.circular(24),
