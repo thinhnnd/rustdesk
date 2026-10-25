@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/mobile/widgets/deskin_shortcut_dialog.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
@@ -1512,6 +1513,22 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               setState(() => _alwaysShowShortcuts = v);
             },
           ),
+          const Divider(
+              height: 1,
+              thickness: 1,
+              indent: 18,
+              endIndent: 18,
+              color: dividerThin),
+          buildNavRow(
+            title: 'Customize Shortcuts',
+            leadingIcon: Icons.tune_rounded,
+            onTap: () {
+              setState(() {
+                _showMousePanel = false;
+              });
+              showDeskInShortcutModal(context, gFFI);
+            },
+          ),
           if (!ffiModel.viewOnly &&
               ffiModel.keyboard &&
               !ffiModel.isPeerAndroid) ...[
@@ -2547,154 +2564,28 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   var _pin = false;
   final _key = GlobalKey();
 
-  static const List<String> _defaultOrder = [
-    'Esc',
-    'Tab',
-    'Ctrl',
-    'Alt',
-    'Shift',
-    'Cmd',
-    '←',
-    '↑',
-    '↓',
-    '→',
-    'Copy',
-    'Paste',
-    'Undo',
-    'SelectAll',
-    'Del',
-    'Enter',
-    'Home',
-    'End',
-    'PgUp',
-    'PgDn',
-    'PrtScr',
-    'Fn',
-    'Pin',
-  ];
-  late List<String> _keyOrder = List<String>.from(_defaultOrder);
-
   InputModel get inputModel => gFFI.inputModel;
 
-  void _openCustomizeShortcutSheet() {
-    HapticFeedback.selectionClick();
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF181B24),
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setModalState) {
-            void moveKey(int oldIndex, int newIndex) {
-              setModalState(() {
-                if (newIndex > oldIndex) newIndex -= 1;
-                final item = _keyOrder.removeAt(oldIndex);
-                _keyOrder.insert(newIndex, item);
-              });
-              setState(() {});
-            }
+  @override
+  void initState() {
+    super.initState();
+    DeskInShortcutRepository.version.addListener(_onShortcutsChanged);
+  }
 
-            return SafeArea(
-              child: Container(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(ctx).size.height * 0.7,
-                ),
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: const [
-                            Icon(Icons.tune_rounded,
-                                color: Colors.lightBlueAccent, size: 20),
-                            SizedBox(width: 8),
-                            Text(
-                              'Tùy chỉnh vị trí phím tắt',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            TextButton(
-                              onPressed: () {
-                                setModalState(() {
-                                  _keyOrder = List<String>.from(_defaultOrder);
-                                });
-                                setState(() {});
-                              },
-                              child: const Text('Mặc định'),
-                            ),
-                            IconButton(
-                              onPressed: () => Navigator.of(ctx).pop(),
-                              icon: const Icon(Icons.close_rounded,
-                                  color: Colors.white70),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    Expanded(
-                      child: ReorderableListView.builder(
-                        itemCount: _keyOrder.length,
-                        onReorder: moveKey,
-                        itemBuilder: (context, index) {
-                          final keyId = _keyOrder[index];
-                          return ListTile(
-                            key: ValueKey(keyId),
-                            dense: true,
-                            leading: ReorderableDragStartListener(
-                              index: index,
-                              child: const Icon(Icons.drag_handle_rounded,
-                                  color: Colors.white54),
-                            ),
-                            title: Text(
-                              keyId,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600),
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.arrow_upward_rounded,
-                                      size: 18, color: Colors.white70),
-                                  onPressed: index > 0
-                                      ? () => moveKey(index, index - 1)
-                                      : null,
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.arrow_downward_rounded,
-                                      size: 18, color: Colors.white70),
-                                  onPressed: index < _keyOrder.length - 1
-                                      ? () => moveKey(index, index + 2)
-                                      : null,
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
+  @override
+  void dispose() {
+    DeskInShortcutRepository.version.removeListener(_onShortcutsChanged);
+    super.dispose();
+  }
+
+  void _onShortcutsChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _openCustomizeShortcutSheet() {
+    showDeskInShortcutModal(context, gFFI);
   }
 
   Widget wrap(String text, void Function() onPressed,
@@ -2768,50 +2659,49 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     }
 
     final pi = gFFI.ffiModel.pi;
-    final isMac = pi.platform == kPeerPlatformMacOS;
-    final isWin = pi.platform == kPeerPlatformWindows;
-    final isLinux = pi.platform == kPeerPlatformLinux;
+    final osKey = DeskInShortcutRepository.osKeyFromPeerPlatform(pi.platform);
+    final customShortcuts = DeskInShortcutRepository.loadForOs(osKey);
 
-    final keyMap = <String, Widget>{
-      'Esc': wrap('Esc', () => inputModel.inputKey('VK_ESCAPE')),
-      'Tab': wrap('Tab', () => inputModel.inputKey('VK_TAB')),
-      'Ctrl': wrap('Ctrl', () => setState(() => inputModel.ctrl = !inputModel.ctrl),
-          active: inputModel.ctrl),
-      'Alt': wrap('Alt', () => setState(() => inputModel.alt = !inputModel.alt),
-          active: inputModel.alt),
-      'Shift': wrap('Shift', () => setState(() => inputModel.shift = !inputModel.shift),
-          active: inputModel.shift),
-      'Cmd': wrap(isMac ? 'Cmd' : 'Win',
-          () => setState(() => inputModel.command = !inputModel.command),
-          active: inputModel.command),
-      '←': wrap('', () => inputModel.inputKey('VK_LEFT'),
-          icon: Icons.keyboard_arrow_left),
-      '↑': wrap('', () => inputModel.inputKey('VK_UP'),
-          icon: Icons.keyboard_arrow_up),
-      '↓': wrap('', () => inputModel.inputKey('VK_DOWN'),
-          icon: Icons.keyboard_arrow_down),
-      '→': wrap('', () => inputModel.inputKey('VK_RIGHT'),
-          icon: Icons.keyboard_arrow_right),
-      'Copy': wrap(isMac ? 'Cmd+C' : 'Ctrl+C', () => sendPrompt(isMac, 'VK_C')),
-      'Paste': wrap(isMac ? 'Cmd+V' : 'Ctrl+V', () => sendPrompt(isMac, 'VK_V')),
-      'Undo': wrap(isMac ? 'Cmd+Z' : 'Ctrl+Z', () => sendPrompt(isMac, 'VK_Z')),
-      'SelectAll': wrap(isMac ? 'Cmd+A' : 'Ctrl+A', () => sendPrompt(isMac, 'VK_A')),
-      'Del': wrap('Del', () => inputModel.inputKey('VK_DELETE')),
-      'Enter': wrap('Enter', () => inputModel.inputKey('VK_ENTER')),
-      'Home': wrap('Home', () => inputModel.inputKey('VK_HOME')),
-      'End': wrap('End', () => inputModel.inputKey('VK_END')),
-      'PgUp': wrap('PgUp', () => inputModel.inputKey('VK_PRIOR')),
-      'PgDn': wrap('PgDn', () => inputModel.inputKey('VK_NEXT')),
-      if (isWin || isLinux)
-        'PrtScr': wrap('PrtScr', () => inputModel.inputKey('VK_SNAPSHOT')),
-      'Fn': wrap('Fn', () => setState(() => _fn = !_fn), active: _fn),
-      'Pin': wrap('', () => setState(() => _pin = !_pin),
-          active: _pin, icon: Icons.push_pin),
-    };
+    Widget buildShortcutButton(DeskInShortcutItem item) {
+      bool isActive = false;
+      if (item.isStickyCtrl) {
+        isActive = inputModel.ctrl;
+      } else if (item.isStickyAlt) {
+        isActive = inputModel.alt;
+      } else if (item.isStickyShift) {
+        isActive = inputModel.shift;
+      } else if (item.isStickyCommand) {
+        isActive = inputModel.command;
+      }
+
+      IconData? arrowIcon;
+      if (item.label == '←') {
+        arrowIcon = Icons.keyboard_arrow_left;
+      } else if (item.label == '↑') {
+        arrowIcon = Icons.keyboard_arrow_up;
+      } else if (item.label == '↓') {
+        arrowIcon = Icons.keyboard_arrow_down;
+      } else if (item.label == '→') {
+        arrowIcon = Icons.keyboard_arrow_right;
+      }
+
+      return wrap(
+        arrowIcon != null ? '' : item.label,
+        () => executeDeskInShortcut(
+          item,
+          gFFI,
+          onModifierToggled: () => setState(() {}),
+        ),
+        active: isActive,
+        icon: arrowIcon,
+      );
+    }
 
     final row1 = <Widget>[
-      for (final id in _keyOrder)
-        if (keyMap.containsKey(id)) keyMap[id]!,
+      for (final item in customShortcuts) buildShortcutButton(item),
+      wrap('Fn', () => setState(() => _fn = !_fn), active: _fn),
+      wrap('', () => setState(() => _pin = !_pin),
+          active: _pin, icon: Icons.push_pin),
     ];
 
     final fnRow = <Widget>[
