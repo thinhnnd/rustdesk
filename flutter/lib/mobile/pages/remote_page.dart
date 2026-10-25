@@ -380,7 +380,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // Set the value to the old value and early return if is still composing. (1 && 2)
     // 1. The composing range is valid
     // 2. The new string is shorter than the composing range.
-    if (_textController.value.isComposingRangeValid) {
+    // Lưu ý: Không chặn khi đang gõ ký tự ASCII thuần (bàn phím tiếng Anh trên iPad gõ Telex/VNI cho Mac)
+    final isPureAscii = newStr.isNotEmpty &&
+        newStr.codeUnits.every((u) => u < 128) &&
+        subOldValue.codeUnits.every((u) => u < 128);
+    if (!isPureAscii && _textController.value.isComposingRangeValid) {
       final composingLength = _textController.value.composing.end -
           _textController.value.composing.start;
       if (composingLength > newStr.length) {
@@ -391,11 +395,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
     // Delete the different part in the old value.
     for (i = 0; i < subOldValue.length - common; ++i) {
-      inputModel.inputKey('VK_BACK');
+      _sendSoftKeyBackspace();
     }
 
     // Input the new string.
-    if (newStr.length > 1) {
+    if (newStr.isEmpty) {
+      return;
+    }
+    if (newStr.codeUnits.every((u) => u < 128)) {
+      for (int k = 0; k < newStr.length; ++k) {
+        inputChar(newStr[k]);
+      }
+    } else if (newStr.length > 1) {
       bind.sessionInputString(sessionId: sessionId, value: newStr);
     } else {
       inputChar(newStr);
@@ -459,8 +470,194 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }
   }
 
+  bool get _hasStickyMobileModifier =>
+      inputModel.alt ||
+      inputModel.ctrl ||
+      inputModel.shift ||
+      inputModel.command;
+
+  void _sendSoftKeyBackspace() {
+    if (!inputModel.keyboardInputAllowed) return;
+    if (!_hasStickyMobileModifier && !gFFI.ffiModel.isPeerAndroid) {
+      // Gửi mã phím phần cứng USB HID Backspace (0x002a -> kVK_Delete trên macOS)
+      // để bộ gõ tiếng Việt trên Mac xử lý xóa dấu/chữ chuẩn xác như bàn phím cứng
+      inputModel.newKeyboardMode('', 0x002a, true, false);
+      inputModel.newKeyboardMode('', 0x002a, false, false);
+      return;
+    }
+    inputModel.inputKey('VK_BACK');
+  }
+
+  bool _trySendAsciiUsbHidKey(String char) {
+    if (char.length != 1 || _hasStickyMobileModifier || gFFI.ffiModel.isPeerAndroid) {
+      return false;
+    }
+    final int code = char.codeUnitAt(0);
+    int? usbHid;
+    bool needsShift = false;
+
+    if (code >= 97 && code <= 122) {
+      // 'a'..'z' -> 0x0004..0x001d
+      usbHid = 0x0004 + (code - 97);
+    } else if (code >= 65 && code <= 90) {
+      // 'A'..'Z' -> 0x0004..0x001d + Shift
+      usbHid = 0x0004 + (code - 65);
+      needsShift = true;
+    } else if (code >= 49 && code <= 57) {
+      // '1'..'9' -> 0x001e..0x0026
+      usbHid = 0x001e + (code - 49);
+    } else if (code == 48) {
+      // '0' -> 0x0027
+      usbHid = 0x0027;
+    } else {
+      switch (char) {
+        case '\n':
+          usbHid = 0x0028; // Enter
+          break;
+        case '\t':
+          usbHid = 0x002b; // Tab
+          break;
+        case ' ':
+          usbHid = 0x002c; // Space
+          break;
+        case '-':
+          usbHid = 0x002d;
+          break;
+        case '_':
+          usbHid = 0x002d;
+          needsShift = true;
+          break;
+        case '=':
+          usbHid = 0x002e;
+          break;
+        case '+':
+          usbHid = 0x002e;
+          needsShift = true;
+          break;
+        case '[':
+          usbHid = 0x002f;
+          break;
+        case '{':
+          usbHid = 0x002f;
+          needsShift = true;
+          break;
+        case ']':
+          usbHid = 0x0030;
+          break;
+        case '}':
+          usbHid = 0x0030;
+          needsShift = true;
+          break;
+        case '\\':
+          usbHid = 0x0031;
+          break;
+        case '|':
+          usbHid = 0x0031;
+          needsShift = true;
+          break;
+        case ';':
+          usbHid = 0x0033;
+          break;
+        case ':':
+          usbHid = 0x0033;
+          needsShift = true;
+          break;
+        case '\'':
+          usbHid = 0x0034;
+          break;
+        case '"':
+          usbHid = 0x0034;
+          needsShift = true;
+          break;
+        case '`':
+          usbHid = 0x0035;
+          break;
+        case '~':
+          usbHid = 0x0035;
+          needsShift = true;
+          break;
+        case ',':
+          usbHid = 0x0036;
+          break;
+        case '<':
+          usbHid = 0x0036;
+          needsShift = true;
+          break;
+        case '.':
+          usbHid = 0x0037;
+          break;
+        case '>':
+          usbHid = 0x0037;
+          needsShift = true;
+          break;
+        case '/':
+          usbHid = 0x0038;
+          break;
+        case '?':
+          usbHid = 0x0038;
+          needsShift = true;
+          break;
+        case '!':
+          usbHid = 0x001e;
+          needsShift = true;
+          break;
+        case '@':
+          usbHid = 0x001f;
+          needsShift = true;
+          break;
+        case '#':
+          usbHid = 0x0020;
+          needsShift = true;
+          break;
+        case '\$':
+          usbHid = 0x0021;
+          needsShift = true;
+          break;
+        case '%':
+          usbHid = 0x0022;
+          needsShift = true;
+          break;
+        case '^':
+          usbHid = 0x0023;
+          needsShift = true;
+          break;
+        case '&':
+          usbHid = 0x0024;
+          needsShift = true;
+          break;
+        case '*':
+          usbHid = 0x0025;
+          needsShift = true;
+          break;
+        case '(':
+          usbHid = 0x0026;
+          needsShift = true;
+          break;
+        case ')':
+          usbHid = 0x0027;
+          needsShift = true;
+          break;
+      }
+    }
+
+    if (usbHid == null) return false;
+
+    if (needsShift) {
+      inputModel.newKeyboardMode('', 0x00e1, true, false);
+    }
+    inputModel.newKeyboardMode(char, usbHid, true, false);
+    inputModel.newKeyboardMode(char, usbHid, false, false);
+    if (needsShift) {
+      inputModel.newKeyboardMode('', 0x00e1, false, false);
+    }
+    return true;
+  }
+
   void inputChar(String char) {
-    if (!inputModel.keyboardInputAllowed) {
+    if (!inputModel.keyboardInputAllowed || char.isEmpty) {
+      return;
+    }
+    if (_trySendAsciiUsbHidKey(char)) {
       return;
     }
     if (char == '\n') {
@@ -2108,7 +2305,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                       // `enableSuggestions` causes secure keyboard to be shown.
                       // https://github.com/flutter/flutter/issues/139143
                       // https://github.com/flutter/flutter/issues/146540
-                      // enableSuggestions: false,
+                      enableSuggestions: !isIOS,
+                      smartDashesType: SmartDashesType.disabled,
+                      smartQuotesType: SmartQuotesType.disabled,
+                      textCapitalization: TextCapitalization.none,
+                      spellCheckConfiguration:
+                          const SpellCheckConfiguration.disabled(),
                       autofocus: true,
                       focusNode: _mobileFocusNode,
                       maxLines: null,
