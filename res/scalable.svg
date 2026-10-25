@@ -54,13 +54,13 @@
      gradientTransform="matrix(26.301,0,0,26.331,90.673535,911.7572)"
      gradientUnits="userSpaceOnUse"><stop
        offset="0"
-       stop-color="#004ba6"
+       stop-color="#b45309"
        id="stop4"
-       style="stop-color:#0071ff;stop-opacity:1;" /><stop
+       style="stop-color:#d97706;stop-opacity:1;" /><stop
        offset="1"
-       stop-color="#00bfe1"
+       stop-color="#fde047"
        id="stop6"
-       style="stop-color:#00bfe1;stop-opacity:1;" /></linearGradient><g
+       style="stop-color:#fde047;stop-opacity:1;" /></linearGradient><g
      id="g763"
      inkscape:export-filename="../../Desktop/path9.png"
      inkscape:export-xdpi="768"
@@ -70,7 +70,7 @@
        inkscape:export-filename="./g369.png"
        inkscape:export-xdpi="3733.2917"
        inkscape:export-ydpi="3733.2917"><rect
-         style="fill:#ffffff;fill-opacity:1;stroke:none;stroke-width:1;stroke-dasharray:none;stroke-opacity:1;paint-order:fill markers stroke"
+         style="fill:#15151a;fill-opacity:1;stroke:none;stroke-width:1;stroke-dasharray:none;stroke-opacity:1;paint-order:fill markers stroke"
          id="rect757"
          width="32"
          height="32"

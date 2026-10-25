@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
@@ -87,8 +89,17 @@ class RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
-  bool _showBar = !isWebDesktop;
+  bool _showBar = false;
   bool _showGestureHelp = false;
+  bool _showMousePanel = false;
+  int _mousePanelSubPage = 0; // 0: main, 1: mouse settings
+  bool _showOperationGuideOverlay = false;
+  bool _operationGuideIsTouchPage = true;
+  bool _alwaysShowShortcuts = false;
+  double _floatingBarRight = 18.0;
+  double _floatingBarBottom = 26.0;
+  bool _isDraggingBar = false;
+  Offset _lastBarDragGlobalPos = Offset.zero;
   String _value = '';
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
@@ -128,6 +139,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       forceRelay: widget.forceRelay,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+        DeviceOrientation.portraitDown,
+      ]);
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
@@ -282,6 +299,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   void onSoftKeyboardChanged(bool visible) {
     if (!visible) {
+      _showEdit = false;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       // [pi.version.isNotEmpty] -> check ready or not, avoid login without soft-keyboard
       if (gFFI.chatModel.chatWindowOverlayEntry == null &&
@@ -304,6 +322,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         });
       }
     } else {
+      _showBar = false;
+      _showGestureHelp = false;
       _iosKeyboardWorkaroundTimer?.cancel();
       _iosKeyboardWorkaroundTimer = null;
       _timer?.cancel();
@@ -464,12 +484,24 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // destroy first, so that our _value trick can work
     _value = initText;
     _textController.text = _value;
-    setState(() => _showEdit = false);
+    setState(() {
+      _showEdit = false;
+      _showBar = false;
+      _showGestureHelp = false;
+      _showMousePanel = false;
+      _mousePanelSubPage = 0;
+    });
     _timer?.cancel();
     _timer = Timer(kMobileDelaySoftKeyboard, () {
       // show now, and sleep a while to requestFocus to
       // make sure edit ready, so that keyboard won't show/hide/show/hide happen
-      setState(() => _showEdit = true);
+      setState(() {
+        _showEdit = true;
+        _showBar = false;
+        _showGestureHelp = false;
+        _showMousePanel = false;
+        _mousePanelSubPage = 0;
+      });
       _timer?.cancel();
       _timer = Timer(kMobileDelaySoftKeyboardFocus, () {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
@@ -479,17 +511,1280 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     });
   }
 
-  Widget _bottomWidget() => _showGestureHelp
-      ? getGestureHelp()
-      : (_showBar && gFFI.ffiModel.pi.displays.isNotEmpty
-          ? getBottomAppBar()
-          : Offstage());
+  Widget _bottomWidget() => const Offstage();
+
+  void _hideSoftKeyboard() {
+    _timer?.cancel();
+    _iosKeyboardWorkaroundTimer?.cancel();
+    setState(() {
+      _showEdit = false;
+      _showBar = false;
+      _showGestureHelp = false;
+      _showMousePanel = false;
+      _mousePanelSubPage = 0;
+    });
+    gFFI.chatModel.softKeyboardRequested.value = false;
+    gFFI.invokeMethod("enable_soft_keyboard", false);
+    _mobileFocusNode.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+    SystemChannels.textInput.invokeMethod('TextInput.hide');
+    _physicalFocusNode.requestFocus();
+  }
+
+  /// 1. Viên thuốc nổi (Capsule Pill):
+  /// - Mặc định nằm ở góc dưới bên phải, ấn giữ (long-press) để di chuyển tự do.
+  /// - Nửa trái mở bàn phím ảo, nửa phải mở thanh công cụ ở giữa.
+  /// - Tự động ẩn khi bàn phím ảo đang mở hoặc khi thanh công cụ đang mở.
+  Widget _buildDeskInCapsulePill(bool keyboardIsVisible) {
+    final ffiModel = Provider.of<FfiModel>(context);
+    if (isWebDesktop ||
+        ffiModel.pi.displays.isEmpty ||
+        keyboardIsVisible ||
+        _showBar) {
+      return const Offstage();
+    }
+    final media = MediaQuery.of(context);
+    final screenWidth = media.size.width;
+    final screenHeight =
+        media.size.height - media.padding.top - media.viewInsets.bottom;
+
+    final double maxRight = (screenWidth - 96.0).clamp(12.0, 2000.0).toDouble();
+    final double maxBottom =
+        (screenHeight - 56.0).clamp(12.0, 2000.0).toDouble();
+    const double minBottom = 12.0;
+    final double effectiveRight =
+        _floatingBarRight.clamp(12.0, maxRight).toDouble();
+    final double effectiveBottom = _floatingBarBottom
+        .clamp(minBottom, max(minBottom, maxBottom))
+        .toDouble();
+
+    return Positioned(
+      right: effectiveRight,
+      bottom: effectiveBottom,
+      child: GestureDetector(
+        onLongPressStart: (details) {
+          HapticFeedback.mediumImpact();
+          setState(() {
+            _isDraggingBar = true;
+            _lastBarDragGlobalPos = details.globalPosition;
+            _floatingBarRight = effectiveRight;
+            _floatingBarBottom = effectiveBottom;
+          });
+        },
+        onLongPressMoveUpdate: (details) {
+          final delta = details.globalPosition - _lastBarDragGlobalPos;
+          _lastBarDragGlobalPos = details.globalPosition;
+          setState(() {
+            _floatingBarRight =
+                (_floatingBarRight - delta.dx).clamp(12.0, maxRight).toDouble();
+            _floatingBarBottom = (_floatingBarBottom - delta.dy)
+                .clamp(minBottom, max(minBottom, maxBottom))
+                .toDouble();
+          });
+        },
+        onLongPressEnd: (_) {
+          HapticFeedback.selectionClick();
+          setState(() {
+            _isDraggingBar = false;
+          });
+        },
+        child: AnimatedScale(
+          scale: _isDraggingBar ? 1.08 : 1.0,
+          duration: const Duration(milliseconds: 140),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.96),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                color: _isDraggingBar
+                    ? const Color(0xFF2F80ED)
+                    : const Color(0xFFCBD5E1),
+                width: _isDraggingBar ? 2.0 : 1.2,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(_isDraggingBar ? 0.45 : 0.34),
+                  blurRadius: _isDraggingBar ? 16 : 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Nửa trái: Mở bàn phím (Nổi bật với nền xanh DeskIn Blue)
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    openKeyboard();
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF2F80ED),
+                      borderRadius: BorderRadius.horizontal(
+                        left: Radius.circular(20),
+                      ),
+                    ),
+                    child: const Icon(
+                      Icons.keyboard_alt_outlined,
+                      color: Colors.white,
+                      size: 18,
+                    ),
+                  ),
+                ),
+                // Nửa phải: Mở thanh công cụ ở giữa (Nền trắng sáng nổi bật trên mọi nền tối/sáng)
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() => _showBar = true);
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: const BoxDecoration(
+                      borderRadius: BorderRadius.horizontal(
+                        right: Radius.circular(20),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.apps_rounded,
+                            color: Color(0xFF1E293B), size: 17),
+                        SizedBox(width: 2),
+                        Icon(Icons.expand_more_rounded,
+                            color: Color(0xFF475569), size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 2. Thanh công cụ riêng biệt (Centered Toolbar - Tông Trắng Sáng & Xanh DeskIn nổi bật):
+  /// - Luôn nằm ở chính giữa màn hình thay vì góc màn hình.
+  /// - Nền trắng mờ sắc nét (Frosted White) kèm viền và đổ bóng sâu giúp nổi bật hoàn toàn trên nền tối của IDE/Mac.
+  /// - Khi mở bàn phím ảo (keyboardIsVisible == true) thì tự động ẩn và không cho mở.
+  Widget _buildDeskInCenteredToolbar(bool keyboardIsVisible, double topInset) {
+    final ffiModel = Provider.of<FfiModel>(context);
+    if (isWebDesktop ||
+        ffiModel.pi.displays.isEmpty ||
+        !_showBar ||
+        keyboardIsVisible) {
+      return const Offstage();
+    }
+    final pi = ffiModel.pi;
+    final hasMultiDisplays = pi.displays.length > 1;
+    final screenWidth = MediaQuery.of(context).size.width;
+    const activeBlue = Color(0xFF2F80ED);
+    const defaultIconColor = Color(0xFF1E293B);
+
+    Widget buildToolBtn({
+      required IconData icon,
+      String? label,
+      bool active = false,
+      Color? iconColor,
+      Color? bgColor,
+      required VoidCallback onTap,
+    }) {
+      final effectiveFg =
+          active ? Colors.white : (iconColor ?? defaultIconColor);
+      return InkWell(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+          decoration: BoxDecoration(
+            color: active ? activeBlue : (bgColor ?? Colors.transparent),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: effectiveFg, size: 19),
+              if (label != null) ...[
+                const SizedBox(width: 5),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: effectiveFg,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Positioned(
+      top: topInset + 10,
+      left: 12,
+      right: 12,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: max(200.0, screenWidth - 24.0)),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.96),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0xFFCBD5E1), width: 1.2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.36),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 1. Ô duy nhất chọn & cài đặt Chuột / Cảm ứng (DeskIn Mouse/Touch Panel)
+                  if (!ffiModel.viewOnly &&
+                      ffiModel.keyboard &&
+                      !ffiModel.isPeerAndroid)
+                    buildToolBtn(
+                      icon: ffiModel.touchMode
+                          ? Icons.touch_app_rounded
+                          : Icons.mouse_rounded,
+                      label: ffiModel.touchMode ? 'Touch' : 'Mouse',
+                      active: _showMousePanel,
+                      bgColor: const Color(0xFFEFF6FF),
+                      iconColor: activeBlue,
+                      onTap: () {
+                        setState(() {
+                          _showMousePanel = !_showMousePanel;
+                          _mousePanelSubPage = 0;
+                        });
+                      },
+                    ),
+                  const SizedBox(width: 2),
+                  // 2. Open Soft Keyboard (automatically closes toolbar)
+                  if (!ffiModel.viewOnly && ffiModel.keyboard)
+                    buildToolBtn(
+                      icon: Icons.keyboard_alt_outlined,
+                      label: 'Keyboard',
+                      onTap: () {
+                        openKeyboard();
+                      },
+                    ),
+                  // 3. Switch Monitor quickly if multi-display
+                  if (hasMultiDisplays)
+                    buildToolBtn(
+                      icon: Icons.desktop_windows_rounded,
+                      label: '${pi.currentDisplay + 1}/${pi.displays.length}',
+                      onTap: () {
+                        final next =
+                            (pi.currentDisplay + 1) % pi.displays.length;
+                        openMonitorInTheSameTab(next, gFFI, pi);
+                        setState(() {});
+                      },
+                    ),
+                  // 4. Display & Quality Options
+                  buildToolBtn(
+                    icon: Icons.tv_rounded,
+                    label: 'Screen',
+                    onTap: () {
+                      setState(() {
+                        _showEdit = false;
+                        _showMousePanel = false;
+                      });
+                      showOptions(context, widget.id, gFFI.dialogManager);
+                    },
+                  ),
+                  // 5. More Actions (Ctrl+Alt+Del, Lock, Transfer, etc.)
+                  buildToolBtn(
+                    icon: Icons.layers_outlined,
+                    label: 'Action',
+                    onTap: () {
+                      setState(() {
+                        _showEdit = false;
+                        _showMousePanel = false;
+                      });
+                      showActions(widget.id);
+                    },
+                  ),
+                  const SizedBox(width: 2),
+                  // 6. Disconnect (Nút đỏ End nổi bật giống DeskIn)
+                  buildToolBtn(
+                    icon: Icons.power_settings_new_rounded,
+                    label: 'End',
+                    iconColor: const Color(0xFFDC2626),
+                    bgColor: const Color(0xFFFEE2E2),
+                    onTap: () => clientClose(sessionId, gFFI),
+                  ),
+                  const SizedBox(width: 2),
+                  // 7. Collapse toolbar
+                  buildToolBtn(
+                    icon: Icons.expand_less_rounded,
+                    iconColor: const Color(0xFF64748B),
+                    onTap: () => setState(() {
+                      _showBar = false;
+                      _showGestureHelp = false;
+                      _showMousePanel = false;
+                      _mousePanelSubPage = 0;
+                    }),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 3. Panel cài đặt Chuột & Cảm ứng chuẩn DeskIn (DeskIn Mouse / Touch Popover Panel):
+  /// - Bấm vào nút Mouse/Touch trên thanh công cụ sẽ xổ ra panel chọn giữa Touch và Cursor.
+  /// - Ở Touch mode: Show Virtual Mouse (+ cỡ chuột ảo), Show Remote Cursor, Operation Guide, Show Shortcuts.
+  /// - Ở Cursor mode: Mouse Settings, Show Virtual Mouse (2 nút L/R), Show Virtual Scroll Wheel, Show Remote Cursor, Operation Guide, Show Shortcuts.
+  Widget _buildDeskInMousePanel(bool keyboardIsVisible, double topInset) {
+    final ffiModel = Provider.of<FfiModel>(context);
+    if (isWebDesktop ||
+        ffiModel.pi.displays.isEmpty ||
+        !_showBar ||
+        !_showMousePanel ||
+        keyboardIsVisible) {
+      return const Offstage();
+    }
+
+    final isTouch = ffiModel.touchMode;
+    final virtualMouseMode = ffiModel.virtualMouseMode;
+    final remoteCursorState = ShowRemoteCursorState.find(widget.id);
+    final showRemoteCursor = remoteCursorState.value;
+    const activeBlue = Color(0xFF2F80ED);
+    const textDark = Color(0xFF1F2329);
+    const textMuted = Color(0xFF646A73);
+    const dividerThin = Color(0xFFEBEEF5);
+    const dividerSection = Color(0xFFF2F4F7);
+
+    void selectMode(bool wantTouch) {
+      if (ffiModel.touchMode == wantTouch) return;
+      HapticFeedback.selectionClick();
+      setState(() {
+        gFFI.ffiModel.toggleTouchMode();
+        final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
+        bind.mainSetLocalOption(key: kOptionTouchMode, value: v);
+        if (gFFI.ffiModel.touchMode) {
+          inputModel.setRelativeMouseMode(false);
+          if (remoteCursorState.value) {
+            bind.sessionToggleOption(
+                sessionId: sessionId, value: 'show-remote-cursor');
+            remoteCursorState.value = false;
+          }
+        }
+      });
+    }
+
+    Widget buildRadioDot(bool selected) {
+      return Container(
+        width: 20,
+        height: 20,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? activeBlue : const Color(0xFFC9CDD4),
+            width: selected ? 2.0 : 1.6,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: selected
+            ? Container(
+                width: 10,
+                height: 10,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: activeBlue,
+                ),
+              )
+            : null,
+      );
+    }
+
+    Widget buildSwitchRow({
+      required String title,
+      IconData? leadingIcon,
+      required bool value,
+      required ValueChanged<bool> onChanged,
+    }) {
+      return InkWell(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onChanged(!value);
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+          child: Row(
+            children: [
+              if (leadingIcon != null) ...[
+                Icon(leadingIcon, size: 19, color: const Color(0xFF4E5969)),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: textDark,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              Transform.scale(
+                scale: 0.86,
+                child: CupertinoSwitch(
+                  value: value,
+                  activeColor: activeBlue,
+                  onChanged: (v) {
+                    HapticFeedback.selectionClick();
+                    onChanged(v);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget buildNavRow({
+      required String title,
+      IconData? leadingIcon,
+      required VoidCallback onTap,
+    }) {
+      return InkWell(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          child: Row(
+            children: [
+              if (leadingIcon != null) ...[
+                Icon(leadingIcon, size: 19, color: const Color(0xFF4E5969)),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: textDark,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: Color(0xFF8F959E),
+                size: 22,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget buildSubPageHeader(String title) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: dividerThin, width: 1)),
+        ),
+        child: Row(
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () {
+                HapticFeedback.selectionClick();
+                setState(() => _mousePanelSubPage = 0);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Icon(Icons.arrow_back_ios_new_rounded,
+                        size: 16, color: activeBlue),
+                    SizedBox(width: 4),
+                    Text(
+                      'Back',
+                      style: TextStyle(
+                        color: activeBlue,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: textDark,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 58),
+          ],
+        ),
+      );
+    }
+
+    Widget buildMainPage() {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Top Touch vs Cursor Radio Selector
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => selectMode(true),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          buildRadioDot(isTouch),
+                          const SizedBox(width: 10),
+                          Icon(
+                            Icons.touch_app_rounded,
+                            size: 26,
+                            color: isTouch
+                                ? activeBlue
+                                : const Color(0xFF8F959E),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Touch',
+                            style: TextStyle(
+                              color: isTouch ? textDark : textMuted,
+                              fontSize: 16,
+                              fontWeight:
+                                  isTouch ? FontWeight.w600 : FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => selectMode(false),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          buildRadioDot(!isTouch),
+                          const SizedBox(width: 10),
+                          Icon(
+                            Icons.near_me_rounded,
+                            size: 26,
+                            color: !isTouch
+                                ? activeBlue
+                                : const Color(0xFF8F959E),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Cursor',
+                            style: TextStyle(
+                              color: !isTouch ? textDark : textMuted,
+                              fontSize: 16,
+                              fontWeight:
+                                  !isTouch ? FontWeight.w600 : FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, thickness: 1, color: dividerThin),
+          if (!isTouch) ...[
+            // Cursor Mode Options (giống hệt ảnh DeskIn)
+            buildNavRow(
+              title: 'Mouse Settings',
+              onTap: () => setState(() => _mousePanelSubPage = 1),
+            ),
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildSwitchRow(
+              title: 'Show Virtual Mouse',
+              value: virtualMouseMode.showVirtualMouse,
+              onChanged: (_) async {
+                await virtualMouseMode.toggleVirtualMouse();
+                if (!virtualMouseMode.showVirtualMouse) {
+                  inputModel.setRelativeMouseMode(false);
+                }
+                setState(() {});
+              },
+            ),
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildSwitchRow(
+              title: 'Show Virtual Scroll Wheel',
+              value: virtualMouseMode.showVirtualScrollWheel,
+              onChanged: (_) async {
+                await virtualMouseMode.toggleVirtualScrollWheel();
+                setState(() {});
+              },
+            ),
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildSwitchRow(
+              title: 'Show Remote Cursor',
+              value: showRemoteCursor,
+              onChanged: (_) async {
+                await bind.sessionToggleOption(
+                    sessionId: sessionId, value: 'show-remote-cursor');
+                remoteCursorState.value = bind.sessionGetToggleOptionSync(
+                    sessionId: sessionId, arg: 'show-remote-cursor');
+                setState(() {});
+              },
+            ),
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildNavRow(
+              title: 'Operation Guide',
+              onTap: () => setState(() {
+                _operationGuideIsTouchPage = false;
+                _showOperationGuideOverlay = true;
+              }),
+            ),
+          ] else ...[
+            // Touch Mode Options (mặc định tắt Show Virtual Mouse như DeskIn)
+            buildSwitchRow(
+              title: 'Show Virtual Mouse',
+              value: virtualMouseMode.showTouchVirtualMouse,
+              onChanged: (_) async {
+                await virtualMouseMode.toggleTouchVirtualMouse();
+                setState(() {});
+              },
+            ),
+            if (virtualMouseMode.showTouchVirtualMouse)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+                child: Row(
+                  children: [
+                    const Text(
+                      'Size',
+                      style: TextStyle(color: textMuted, fontSize: 13),
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: activeBlue,
+                          thumbColor: activeBlue,
+                          inactiveTrackColor: const Color(0xFFDDE2E9),
+                        ),
+                        child: Slider(
+                          value: virtualMouseMode.virtualMouseScale,
+                          min: 0.8,
+                          max: 1.8,
+                          divisions: 10,
+                          onChanged: (v) {
+                            virtualMouseMode.setVirtualMouseScale(v);
+                            setState(() {});
+                          },
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${(virtualMouseMode.virtualMouseScale * 100).round()}%',
+                      style: const TextStyle(
+                        color: textMuted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildNavRow(
+              title: 'Operation Guide',
+              onTap: () => setState(() {
+                _operationGuideIsTouchPage = true;
+                _showOperationGuideOverlay = true;
+              }),
+            ),
+          ],
+          Container(height: 7, color: dividerSection),
+          buildSwitchRow(
+            title: 'Show Shortcuts',
+            leadingIcon: Icons.shortcut_rounded,
+            value: _alwaysShowShortcuts,
+            onChanged: (v) {
+              setState(() => _alwaysShowShortcuts = v);
+            },
+          ),
+        ],
+      );
+    }
+
+    Widget buildMouseSettingsPage() {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          buildSubPageHeader('Mouse Settings'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Cursor Speed',
+                      style: TextStyle(
+                        color: textDark,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      '${virtualMouseMode.cursorSpeed.toStringAsFixed(1)}x',
+                      style: const TextStyle(
+                        color: activeBlue,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Text('Slow',
+                        style: TextStyle(color: textMuted, fontSize: 12)),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: activeBlue,
+                          thumbColor: activeBlue,
+                          inactiveTrackColor: const Color(0xFFDDE2E9),
+                        ),
+                        child: Slider(
+                          value: virtualMouseMode.cursorSpeed,
+                          min: 0.5,
+                          max: 2.0,
+                          divisions: 15,
+                          onChanged: (v) {
+                            virtualMouseMode.setCursorSpeed(v);
+                            setState(() {});
+                          },
+                        ),
+                      ),
+                    ),
+                    const Text('Fast',
+                        style: TextStyle(color: textMuted, fontSize: 12)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Divider(
+              height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+          buildSwitchRow(
+            title: 'Show Virtual Joystick',
+            value: virtualMouseMode.showVirtualJoystick,
+            onChanged: (_) async {
+              await virtualMouseMode.toggleVirtualJoystick();
+              if (!virtualMouseMode.showVirtualJoystick) {
+                inputModel.setRelativeMouseMode(false);
+              }
+              setState(() {});
+            },
+          ),
+          if (virtualMouseMode.showVirtualJoystick) ...[
+            const Divider(
+                height: 1, thickness: 1, indent: 18, endIndent: 18, color: dividerThin),
+            buildSwitchRow(
+              title: 'Relative Mouse Mode',
+              value: inputModel.relativeMouseMode.value,
+              onChanged: (v) {
+                inputModel.setRelativeMouseMode(v);
+                setState(() {});
+              },
+            ),
+          ],
+          const SizedBox(height: 8),
+        ],
+      );
+    }
+
+    return Positioned.fill(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Bấm ra ngoài panel để đóng
+          GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () {
+              setState(() {
+                _showMousePanel = false;
+                _mousePanelSubPage = 0;
+              });
+            },
+            child: const SizedBox.expand(),
+          ),
+          Positioned(
+            top: topInset + 56,
+            left: 16,
+            right: 16,
+            child: Center(
+              child: Material(
+                color: Colors.transparent,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: 345,
+                    maxHeight: max(
+                        220.0, MediaQuery.of(context).size.height - topInset - 72),
+                  ),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(18),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.28),
+                          blurRadius: 24,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: SingleChildScrollView(
+                      child: _mousePanelSubPage == 1
+                          ? buildMouseSettingsPage()
+                          : buildMainPage(),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 4. Màn hình hướng dẫn cử chỉ toàn màn hình chuẩn DeskIn (Tip – Touch Mode / Cursor Mode Gestures):
+  /// - Hiển thị 6 thẻ trắng lớn (3 cột x 2 hàng) với biểu tượng trực quan "[ Cử chỉ ] = [ Tác vụ ]".
+  /// - Có nút chuyển trang giữa Touch Mode và Cursor Mode + nút Close màu xanh DeskIn.
+  Widget _buildDeskInOperationGuideOverlay(double topInset) {
+    if (!_showOperationGuideOverlay) {
+      return const Offstage();
+    }
+    const activeBlue = Color(0xFF2F80ED);
+    const textDark = Color(0xFF1F2329);
+    final isTouchPage = _operationGuideIsTouchPage;
+
+    final cards = isTouchPage
+        ? <Map<String, dynamic>>[
+            {
+              'leftLabel': 'Click',
+              'rightLabel': 'Left click',
+              'leftIcon': GestureIcons.iconGestureTap,
+              'rightIcon': Icons.mouse_outlined,
+            },
+            {
+              'leftLabel': 'Hold and click',
+              'rightLabel': 'Right click',
+              'leftIcon': GestureIcons.iconGesturePressHold,
+              'rightIcon': Icons.mouse_outlined,
+            },
+            {
+              'leftLabel': 'Short press and drag',
+              'rightLabel': 'Drag position',
+              'leftIcon': GestureIcons.iconGestureFSwipeRight,
+              'rightIcon': Icons.file_copy_outlined,
+            },
+            {
+              'leftLabel': 'Two-finger swipe',
+              'rightLabel': 'Window scrolling',
+              'leftIcon': GestureIcons.iconGestureFDrag,
+              'rightIcon': Icons.swap_vert_rounded,
+            },
+            {
+              'leftLabel': 'Pinch with two fingers',
+              'rightLabel': 'Zoom',
+              'leftIcon': GestureIcons.iconGesturePinch,
+              'rightIcon': Icons.open_in_full_rounded,
+            },
+            {
+              'leftLabel': 'Three-finger swipe',
+              'rightLabel': 'Switch screen',
+              'leftIcon': GestureIcons.iconGestureFThreeFingers,
+              'rightIcon': Icons.view_column_outlined,
+            },
+          ]
+        : <Map<String, dynamic>>[
+            {
+              'leftLabel': 'One-finger move',
+              'rightLabel': 'Move cursor',
+              'leftIcon': GestureIcons.iconGestureFSwipeRight,
+              'rightIcon': Icons.near_me_rounded,
+            },
+            {
+              'leftLabel': 'Click / L button',
+              'rightLabel': 'Left click',
+              'leftIcon': GestureIcons.iconGestureTap,
+              'rightIcon': Icons.mouse_outlined,
+            },
+            {
+              'leftLabel': 'Hold L + Move finger',
+              'rightLabel': 'Select text / Drag',
+              'leftIcon': GestureIcons.iconGesturePressHold,
+              'rightIcon': Icons.text_fields_rounded,
+            },
+            {
+              'leftLabel': 'Two-finger swipe',
+              'rightLabel': 'Window scrolling',
+              'leftIcon': GestureIcons.iconGestureFDrag,
+              'rightIcon': Icons.swap_vert_rounded,
+            },
+            {
+              'leftLabel': 'Pinch with two fingers',
+              'rightLabel': 'Zoom',
+              'leftIcon': GestureIcons.iconGesturePinch,
+              'rightIcon': Icons.open_in_full_rounded,
+            },
+            {
+              'leftLabel': 'Three-finger swipe',
+              'rightLabel': 'Switch screen',
+              'leftIcon': GestureIcons.iconGestureFThreeFingers,
+              'rightIcon': Icons.view_column_outlined,
+            },
+          ];
+
+    Widget buildGestureCard(Map<String, dynamic> card, double cardWidth) {
+      final isSwitchScreen = card['rightLabel'] == 'Switch screen';
+      return Container(
+        width: cardWidth,
+        height: 126,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.22),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Flexible(
+                  child: Text(
+                    card['leftLabel'] as String,
+                    style: const TextStyle(
+                      color: textDark,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  card['rightLabel'] as String,
+                  style: const TextStyle(
+                    color: textDark,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+            Expanded(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEFF6FF),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(
+                      card['leftIcon'] as IconData,
+                      size: 32,
+                      color: activeBlue,
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 14),
+                    child: Text(
+                      '=',
+                      style: TextStyle(
+                        color: Color(0xFF94A3B8),
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    alignment: Alignment.center,
+                    child: isSwitchScreen
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4, vertical: 2),
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                      color: textDark, width: 1.4),
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                                child: const Text(
+                                  '1',
+                                  style: TextStyle(
+                                    color: textDark,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 2),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: textDark,
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                                child: const Text(
+                                  '2',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                        : Icon(
+                            card['rightIcon'] as IconData,
+                            size: 28,
+                            color: textDark,
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final screenWidth = MediaQuery.of(context).size.width;
+    final availableWidth = max(320.0, screenWidth - 48.0);
+    final cols = screenWidth >= 640 ? 3 : 2;
+    final cardWidth =
+        ((availableWidth - (cols - 1) * 16.0) / cols).clamp(150.0, 290.0).toDouble();
+
+    return Positioned.fill(
+      child: Material(
+        color: Colors.black.withOpacity(0.76),
+        child: SafeArea(
+          child: Column(
+            children: [
+              // Top bar: Close X + Title
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(
+                  children: [
+                    IconButton(
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        setState(() => _showOperationGuideOverlay = false);
+                      },
+                      icon: const Icon(Icons.close_rounded,
+                          color: Colors.white, size: 28),
+                    ),
+                    Expanded(
+                      child: Text(
+                        isTouchPage
+                            ? 'Tip – Touch Mode Gestures'
+                            : 'Tip – Cursor Mode Gestures',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 48),
+                  ],
+                ),
+              ),
+              // Center 6 gesture cards
+              Expanded(
+                child: Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    child: Wrap(
+                      spacing: 16,
+                      runSpacing: 16,
+                      alignment: WrapAlignment.center,
+                      children: cards
+                          .map((c) => buildGestureCard(c, cardWidth))
+                          .toList(),
+                    ),
+                  ),
+                ),
+              ),
+              // Page dots
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isTouchPage ? Colors.white : Colors.white38,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: !isTouchPage ? Colors.white : Colors.white38,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Bottom buttons: Previous/Next page + Close
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white70, width: 1),
+                        minimumSize: const Size(124, 42),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        setState(() {
+                          _operationGuideIsTouchPage =
+                              !_operationGuideIsTouchPage;
+                        });
+                      },
+                      child: Text(
+                        isTouchPage ? 'Cursor page' : 'Previous page',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: activeBlue,
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size(124, 42),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        setState(() => _showOperationGuideOverlay = false);
+                      },
+                      child: const Text(
+                        'Close',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final topInset = MediaQuery.of(context).padding.top;
+    final viewInsetsBottom = MediaQuery.of(context).viewInsets.bottom;
     final keyboardIsVisible =
-        keyboardVisibilityController.isVisible && _showEdit;
-    final showActionButton = !_showBar || keyboardIsVisible || _showGestureHelp;
+        (keyboardVisibilityController.isVisible || viewInsetsBottom > 80) &&
+            (_showEdit || gFFI.chatModel.softKeyboardRequested.value);
 
     return WillPopScope(
       onWillPop: () async {
@@ -497,35 +1792,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         return false;
       },
       child: Scaffold(
-          // workaround for https://github.com/rustdesk/rustdesk/issues/3131
-          floatingActionButtonLocation: keyboardIsVisible
-              ? FABLocation(FloatingActionButtonLocation.endFloat, 0, -35)
-              : null,
-          floatingActionButton: !showActionButton
-              ? null
-              : FloatingActionButton(
-                  mini: !keyboardIsVisible,
-                  child: Icon(
-                    (keyboardIsVisible || _showGestureHelp)
-                        ? Icons.expand_more
-                        : Icons.expand_less,
-                    color: Colors.white,
-                  ),
-                  backgroundColor: MyTheme.accent,
-                  onPressed: () {
-                    setState(() {
-                      if (keyboardIsVisible) {
-                        _showEdit = false;
-                        gFFI.invokeMethod("enable_soft_keyboard", false);
-                        _mobileFocusNode.unfocus();
-                        _physicalFocusNode.requestFocus();
-                      } else if (_showGestureHelp) {
-                        _showGestureHelp = false;
-                      } else {
-                        _showBar = !_showBar;
-                      }
-                    });
-                  }),
+          extendBody: true,
           bottomNavigationBar: Obx(() => Stack(
                 alignment: Alignment.bottomCenter,
                 children: [
@@ -543,39 +1810,66 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 ],
               )),
           body: Obx(
-            () => getRawPointerAndKeyBody(Overlay(
-              initialEntries: [
-                OverlayEntry(builder: (context) {
-                  return Container(
-                    color: kColorCanvas,
-                    child: isWebDesktop
-                        ? getBodyForDesktopWithListener()
-                        : SafeArea(
-                            child:
-                                OrientationBuilder(builder: (ctx, orientation) {
-                              if (_currentOrientation != orientation) {
-                                Timer(const Duration(milliseconds: 200), () {
-                                  gFFI.dialogManager
-                                      .resetMobileActionsOverlay(ffi: gFFI);
-                                  _currentOrientation = orientation;
-                                  gFFI.canvasModel.updateViewStyle();
-                                });
-                              }
-                              return Container(
-                                color: MyTheme.canvasColor,
-                                child: inputModel.isPhysicalMouse.value
-                                    ? getBodyForMobile()
-                                    : RawTouchGestureDetectorRegion(
-                                        child: getBodyForMobile(),
-                                        ffi: gFFI,
-                                      ),
-                              );
-                            }),
-                          ),
-                  );
-                })
-              ],
-            )),
+            () => getRawPointerAndKeyBody(
+              Container(
+                color: kColorCanvas,
+                child: isWebDesktop
+                    ? getBodyForDesktopWithListener()
+                    : OrientationBuilder(builder: (ctx, orientation) {
+                        if (_currentOrientation != orientation) {
+                          Timer(const Duration(milliseconds: 200), () {
+                            gFFI.dialogManager
+                                .resetMobileActionsOverlay(ffi: gFFI);
+                            _currentOrientation = orientation;
+                            gFFI.canvasModel.updateViewStyle();
+                          });
+                        }
+                        final chatKeyboardRequested =
+                            gFFI.chatModel.softKeyboardRequested.value;
+                        final kbActive =
+                            (keyboardVisibilityController.isVisible ||
+                                    viewInsetsBottom > 80) &&
+                                (_showEdit || chatKeyboardRequested);
+                        return Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Container(
+                              color: MyTheme.canvasColor,
+                              child: inputModel.isPhysicalMouse.value
+                                  ? getBodyForMobile()
+                                  : RawTouchGestureDetectorRegion(
+                                      child: getBodyForMobile(),
+                                      ffi: gFFI,
+                                    ),
+                            ),
+                            if (gFFI.ffiModel.touchMode)
+                              FloatingMouse(
+                                ffi: gFFI,
+                              )
+                            else
+                              FloatingMouseWidgets(
+                                ffi: gFFI,
+                              ),
+                            // Thanh phím tắt (Cmd, Alt, Ctrl,...) + Nút mới chuyên ẩn bàn phím nằm trên RawTouchGestureDetectorRegion
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: KeyHelpTools(
+                                keyboardIsVisible: kbActive,
+                                showGestureHelp: _alwaysShowShortcuts,
+                                onHideKeyboard: _hideSoftKeyboard,
+                              ),
+                            ),
+                            _buildDeskInCapsulePill(kbActive),
+                            _buildDeskInCenteredToolbar(kbActive, topInset),
+                            _buildDeskInMousePanel(kbActive, topInset),
+                            _buildDeskInOperationGuideOverlay(topInset),
+                          ],
+                        );
+                      }),
+              ),
+            ),
           )),
     );
   }
@@ -700,28 +1994,25 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   bool get showCursorPaint =>
       !gFFI.ffiModel.isPeerAndroid &&
+      !gFFI.ffiModel.touchMode &&
       !gFFI.canvasModel.cursorEmbedded &&
       !gFFI.inputModel.relativeMouseMode.value;
 
   Widget getBodyForMobile() {
+    Provider.of<FfiModel>(context);
     return Container(
+        width: double.infinity,
+        height: double.infinity,
         color: MyTheme.canvasColor,
         child: Stack(children: () {
-          final paints = [
+          final paints = <Widget>[
+            const SizedBox.expand(),
             ImagePaint(ffiModel: gFFI.ffiModel),
             Positioned(
               top: 10,
               right: 10,
               child: QualityMonitor(gFFI.qualityMonitorModel),
             ),
-            Obx(() {
-              final chatKeyboardRequested =
-                  gFFI.chatModel.softKeyboardRequested.value;
-              return KeyHelpTools(
-                  keyboardIsVisible: keyboardVisibilityController.isVisible &&
-                      (_showEdit || chatKeyboardRequested),
-                  showGestureHelp: _showGestureHelp);
-            }),
             SizedBox(
               width: 0,
               height: 0,
@@ -755,15 +2046,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           ];
           if (showCursorPaint) {
             paints.add(CursorPaint(widget.id));
-          }
-          if (gFFI.ffiModel.touchMode) {
-            paints.add(FloatingMouse(
-              ffi: gFFI,
-            ));
-          } else {
-            paints.add(FloatingMouseWidgets(
-              ffi: gFFI,
-            ));
           }
           return paints;
         }()));
@@ -956,69 +2238,221 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               inputModel: gFFI.inputModel,
             )));
   }
-
-  // * Currently mobile does not enable map mode
-  // void changePhysicalKeyboardInputMode() async {
-  //   var current = await bind.sessionGetKeyboardMode(id: widget.id) ?? "legacy";
-  //   gFFI.dialogManager.show((setState, close) {
-  //     void setMode(String? v) async {
-  //       await bind.sessionSetKeyboardMode(id: widget.id, value: v ?? "");
-  //       setState(() => current = v ?? '');
-  //       Future.delayed(Duration(milliseconds: 300), close);
-  //     }
-  //
-  //     return CustomAlertDialog(
-  //         title: Text(translate('Physical Keyboard Input Mode')),
-  //         content: Column(mainAxisSize: MainAxisSize.min, children: [
-  //           getRadio('Legacy mode', 'legacy', current, setMode),
-  //           getRadio('Map mode', 'map', current, setMode),
-  //         ]));
-  //   }, clickMaskDismiss: true);
-  // }
 }
 
 class KeyHelpTools extends StatefulWidget {
   final bool keyboardIsVisible;
   final bool showGestureHelp;
+  final VoidCallback? onHideKeyboard;
 
-  /// need to show by external request, etc [keyboardIsVisible] or [changeTouchMode]
   bool get requestShow => keyboardIsVisible || showGestureHelp;
 
-  KeyHelpTools(
-      {required this.keyboardIsVisible, required this.showGestureHelp});
+  KeyHelpTools({
+    required this.keyboardIsVisible,
+    required this.showGestureHelp,
+    this.onHideKeyboard,
+  });
 
   @override
   State<KeyHelpTools> createState() => _KeyHelpToolsState();
 }
 
 class _KeyHelpToolsState extends State<KeyHelpTools> {
-  var _more = true;
   var _fn = false;
   var _pin = false;
-  final _keyboardVisibilityController = KeyboardVisibilityController();
   final _key = GlobalKey();
+
+  static const List<String> _defaultOrder = [
+    'Esc',
+    'Tab',
+    'Ctrl',
+    'Alt',
+    'Shift',
+    'Cmd',
+    '←',
+    '↑',
+    '↓',
+    '→',
+    'Copy',
+    'Paste',
+    'Undo',
+    'SelectAll',
+    'Del',
+    'Enter',
+    'Home',
+    'End',
+    'PgUp',
+    'PgDn',
+    'PrtScr',
+    'Fn',
+    'Pin',
+  ];
+  late List<String> _keyOrder = List<String>.from(_defaultOrder);
 
   InputModel get inputModel => gFFI.inputModel;
 
+  void _openCustomizeShortcutSheet() {
+    HapticFeedback.selectionClick();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF181B24),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            void moveKey(int oldIndex, int newIndex) {
+              setModalState(() {
+                if (newIndex > oldIndex) newIndex -= 1;
+                final item = _keyOrder.removeAt(oldIndex);
+                _keyOrder.insert(newIndex, item);
+              });
+              setState(() {});
+            }
+
+            return SafeArea(
+              child: Container(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.7,
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: const [
+                            Icon(Icons.tune_rounded,
+                                color: Colors.lightBlueAccent, size: 20),
+                            SizedBox(width: 8),
+                            Text(
+                              'Tùy chỉnh vị trí phím tắt',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            TextButton(
+                              onPressed: () {
+                                setModalState(() {
+                                  _keyOrder = List<String>.from(_defaultOrder);
+                                });
+                                setState(() {});
+                              },
+                              child: const Text('Mặc định'),
+                            ),
+                            IconButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              icon: const Icon(Icons.close_rounded,
+                                  color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Expanded(
+                      child: ReorderableListView.builder(
+                        itemCount: _keyOrder.length,
+                        onReorder: moveKey,
+                        itemBuilder: (context, index) {
+                          final keyId = _keyOrder[index];
+                          return ListTile(
+                            key: ValueKey(keyId),
+                            dense: true,
+                            leading: ReorderableDragStartListener(
+                              index: index,
+                              child: const Icon(Icons.drag_handle_rounded,
+                                  color: Colors.white54),
+                            ),
+                            title: Text(
+                              keyId,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.arrow_upward_rounded,
+                                      size: 18, color: Colors.white70),
+                                  onPressed: index > 0
+                                      ? () => moveKey(index, index - 1)
+                                      : null,
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.arrow_downward_rounded,
+                                      size: 18, color: Colors.white70),
+                                  onPressed: index < _keyOrder.length - 1
+                                      ? () => moveKey(index, index + 2)
+                                      : null,
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget wrap(String text, void Function() onPressed,
-      {bool? active, IconData? icon}) {
-    return TextButton(
-        style: TextButton.styleFrom(
-          minimumSize: Size(0, 0),
-          padding: EdgeInsets.symmetric(vertical: 10, horizontal: 9.75),
-          //adds padding inside the button
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          //limits the touch area to the button area
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(5.0),
+      {bool? active, IconData? icon, Color? iconColor}) {
+    final isActive = active == true;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2.5),
+      child: Material(
+        color: isActive
+            ? const Color(0xFF2B6CB0)
+            : const Color(0xFF2C313C),
+        borderRadius: BorderRadius.circular(7.0),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(7.0),
+          onTap: () {
+            HapticFeedback.selectionClick();
+            onPressed();
+          },
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 34),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(7.0),
+              border: Border.all(
+                color: isActive ? Colors.lightBlueAccent : Colors.white24,
+                width: 0.8,
+              ),
+            ),
+            child: icon != null
+                ? Icon(icon, size: 16, color: iconColor ?? Colors.white)
+                : Text(
+                    translate(text.trim()),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
           ),
-          backgroundColor: active == true ? MyTheme.accent80 : null,
         ),
-        child: icon != null
-            ? Icon(icon, size: 14, color: Colors.white)
-            : Text(translate(text),
-                style: TextStyle(color: Colors.white, fontSize: 11)),
-        onPressed: onPressed);
+      ),
+    );
   }
 
   _updateRect() {
@@ -1038,7 +2472,6 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   @override
   Widget build(BuildContext context) {
     final keyboard = HardwareKeyboard.instance;
-    // Keep touch selections visible without physical modifiers opening the bar.
     final hasTouchModifier = (inputModel.ctrl && !keyboard.isControlPressed) ||
         (inputModel.alt && !keyboard.isAltPressed) ||
         (inputModel.shift && !keyboard.isShiftPressed) ||
@@ -1048,156 +2481,175 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
           .keyHelpToolsVisibilityChanged(null, widget.keyboardIsVisible);
       return Offstage();
     }
-    final size = MediaQuery.of(context).size;
 
     final pi = gFFI.ffiModel.pi;
     final isMac = pi.platform == kPeerPlatformMacOS;
     final isWin = pi.platform == kPeerPlatformWindows;
     final isLinux = pi.platform == kPeerPlatformLinux;
-    final modifiers = <Widget>[
-      wrap('Ctrl ', () {
-        setState(() => inputModel.ctrl = !inputModel.ctrl);
-      }, active: inputModel.ctrl),
-      wrap(' Alt ', () {
-        setState(() => inputModel.alt = !inputModel.alt);
-      }, active: inputModel.alt),
-      wrap('Shift', () {
-        setState(() => inputModel.shift = !inputModel.shift);
-      }, active: inputModel.shift),
-      wrap(isMac ? ' Cmd ' : ' Win ', () {
-        setState(() => inputModel.command = !inputModel.command);
-      }, active: inputModel.command),
-    ];
-    final keys = <Widget>[
-      wrap(
-          ' Fn ',
-          () => setState(
-                () {
-                  _fn = !_fn;
-                  if (_fn) {
-                    _more = false;
-                  }
-                },
-              ),
-          active: _fn),
-      wrap(
-          '',
-          () => setState(
-                () => _pin = !_pin,
-              ),
-          active: _pin,
-          icon: Icons.push_pin),
-      wrap(
-          ' ... ',
-          () => setState(
-                () {
-                  _more = !_more;
-                  if (_more) {
-                    _fn = false;
-                  }
-                },
-              ),
-          active: _more),
-    ];
-    final fn = <Widget>[
-      SizedBox(width: 9999),
-    ];
-    for (var i = 1; i <= 12; ++i) {
-      final name = 'F$i';
-      fn.add(wrap(name, () {
-        inputModel.inputKey('VK_$name');
-      }));
-    }
-    final more = <Widget>[
-      SizedBox(width: 9999),
-      wrap('Esc', () {
-        inputModel.inputKey('VK_ESCAPE');
-      }),
-      wrap('Tab', () {
-        inputModel.inputKey('VK_TAB');
-      }),
-      wrap('Home', () {
-        inputModel.inputKey('VK_HOME');
-      }),
-      wrap('End', () {
-        inputModel.inputKey('VK_END');
-      }),
-      wrap('Ins', () {
-        inputModel.inputKey('VK_INSERT');
-      }),
-      wrap('Del', () {
-        inputModel.inputKey('VK_DELETE');
-      }),
-      wrap('PgUp', () {
-        inputModel.inputKey('VK_PRIOR');
-      }),
-      wrap('PgDn', () {
-        inputModel.inputKey('VK_NEXT');
-      }),
-      // to-do: support PrtScr on Mac
+
+    final keyMap = <String, Widget>{
+      'Esc': wrap('Esc', () => inputModel.inputKey('VK_ESCAPE')),
+      'Tab': wrap('Tab', () => inputModel.inputKey('VK_TAB')),
+      'Ctrl': wrap('Ctrl', () => setState(() => inputModel.ctrl = !inputModel.ctrl),
+          active: inputModel.ctrl),
+      'Alt': wrap('Alt', () => setState(() => inputModel.alt = !inputModel.alt),
+          active: inputModel.alt),
+      'Shift': wrap('Shift', () => setState(() => inputModel.shift = !inputModel.shift),
+          active: inputModel.shift),
+      'Cmd': wrap(isMac ? 'Cmd' : 'Win',
+          () => setState(() => inputModel.command = !inputModel.command),
+          active: inputModel.command),
+      '←': wrap('', () => inputModel.inputKey('VK_LEFT'),
+          icon: Icons.keyboard_arrow_left),
+      '↑': wrap('', () => inputModel.inputKey('VK_UP'),
+          icon: Icons.keyboard_arrow_up),
+      '↓': wrap('', () => inputModel.inputKey('VK_DOWN'),
+          icon: Icons.keyboard_arrow_down),
+      '→': wrap('', () => inputModel.inputKey('VK_RIGHT'),
+          icon: Icons.keyboard_arrow_right),
+      'Copy': wrap(isMac ? 'Cmd+C' : 'Ctrl+C', () => sendPrompt(isMac, 'VK_C')),
+      'Paste': wrap(isMac ? 'Cmd+V' : 'Ctrl+V', () => sendPrompt(isMac, 'VK_V')),
+      'Undo': wrap(isMac ? 'Cmd+Z' : 'Ctrl+Z', () => sendPrompt(isMac, 'VK_Z')),
+      'SelectAll': wrap(isMac ? 'Cmd+A' : 'Ctrl+A', () => sendPrompt(isMac, 'VK_A')),
+      'Del': wrap('Del', () => inputModel.inputKey('VK_DELETE')),
+      'Enter': wrap('Enter', () => inputModel.inputKey('VK_ENTER')),
+      'Home': wrap('Home', () => inputModel.inputKey('VK_HOME')),
+      'End': wrap('End', () => inputModel.inputKey('VK_END')),
+      'PgUp': wrap('PgUp', () => inputModel.inputKey('VK_PRIOR')),
+      'PgDn': wrap('PgDn', () => inputModel.inputKey('VK_NEXT')),
       if (isWin || isLinux)
-        wrap('PrtScr', () {
-          inputModel.inputKey('VK_SNAPSHOT');
-        }),
-      if (isWin || isLinux)
-        wrap('ScrollLock', () {
-          inputModel.inputKey('VK_SCROLL');
-        }),
-      if (isWin || isLinux)
-        wrap('Pause', () {
-          inputModel.inputKey('VK_PAUSE');
-        }),
-      if (isWin || isLinux)
-        // Maybe it's better to call it "Menu"
-        // https://en.wikipedia.org/wiki/Menu_key
-        wrap('Menu', () {
-          inputModel.inputKey('Apps');
-        }),
-      wrap('Enter', () {
-        inputModel.inputKey('VK_ENTER');
-      }),
-      SizedBox(width: 9999),
-      wrap('', () {
-        inputModel.inputKey('VK_LEFT');
-      }, icon: Icons.keyboard_arrow_left),
-      wrap('', () {
-        inputModel.inputKey('VK_UP');
-      }, icon: Icons.keyboard_arrow_up),
-      wrap('', () {
-        inputModel.inputKey('VK_DOWN');
-      }, icon: Icons.keyboard_arrow_down),
-      wrap('', () {
-        inputModel.inputKey('VK_RIGHT');
-      }, icon: Icons.keyboard_arrow_right),
-      wrap(isMac ? 'Cmd+C' : 'Ctrl+C', () {
-        sendPrompt(isMac, 'VK_C');
-      }),
-      wrap(isMac ? 'Cmd+V' : 'Ctrl+V', () {
-        sendPrompt(isMac, 'VK_V');
-      }),
-      wrap(isMac ? 'Cmd+S' : 'Ctrl+S', () {
-        sendPrompt(isMac, 'VK_S');
-      }),
+        'PrtScr': wrap('PrtScr', () => inputModel.inputKey('VK_SNAPSHOT')),
+      'Fn': wrap('Fn', () => setState(() => _fn = !_fn), active: _fn),
+      'Pin': wrap('', () => setState(() => _pin = !_pin),
+          active: _pin, icon: Icons.push_pin),
+    };
+
+    final row1 = <Widget>[
+      for (final id in _keyOrder)
+        if (keyMap.containsKey(id)) keyMap[id]!,
     ];
-    final space = size.width > 320 ? 4.0 : 2.0;
-    // 500 ms is long enough for this widget to be built!
-    Future.delayed(Duration(milliseconds: 500), () {
+
+    final fnRow = <Widget>[
+      for (var i = 1; i <= 12; ++i)
+        wrap('F$i', () => inputModel.inputKey('VK_F$i')),
+    ];
+
+    Future.delayed(const Duration(milliseconds: 200), () {
       _updateRect();
     });
-    return Container(
-        key: _key,
-        color: Color(0xAA000000),
-        padding: EdgeInsets.only(
-            top: _keyboardVisibilityController.isVisible ? 24 : 4, bottom: 8),
-        child: Wrap(
-          spacing: space,
-          runSpacing: space,
-          children: <Widget>[SizedBox(width: 9999)] +
-              modifiers +
-              keys +
-              (_fn ? fn : []) +
-              (_more ? more : []),
-        ));
+
+    return SafeArea(
+      top: false,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.centerRight,
+        children: [
+          Container(
+            key: _key,
+            margin: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1D26).withOpacity(0.78),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white24, width: 1),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.35),
+                  blurRadius: 10,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_fn)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 5),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      padding: EdgeInsets.only(
+                          right: widget.keyboardIsVisible ? 54 : 0),
+                      child: Row(children: fnRow),
+                    ),
+                  ),
+                Row(
+                  children: [
+                    wrap(
+                      '',
+                      _openCustomizeShortcutSheet,
+                      icon: Icons.tune_rounded,
+                      iconColor: Colors.lightBlueAccent,
+                    ),
+                    Container(
+                      width: 1,
+                      height: 22,
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      color: Colors.white24,
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        padding: EdgeInsets.only(
+                            right: widget.keyboardIsVisible ? 54 : 0),
+                        child: Row(children: row1),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (widget.keyboardIsVisible)
+            Positioned(
+              right: 14,
+              bottom: 10,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  HapticFeedback.lightImpact();
+                  if (widget.onHideKeyboard != null) {
+                    widget.onHideKeyboard!();
+                  } else {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    SystemChannels.textInput.invokeMethod('TextInput.hide');
+                  }
+                },
+                child: Container(
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF252A36).withOpacity(0.96),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.35),
+                      width: 1.1,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.55),
+                        blurRadius: 10,
+                        spreadRadius: 1,
+                        offset: const Offset(-2, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Icon(
+                        Icons.keyboard_hide_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1233,27 +2685,33 @@ class CursorPaint extends StatelessWidget {
     final m = Provider.of<CursorModel>(context);
     final c = Provider.of<CanvasModel>(context);
     final ffiModel = Provider.of<FfiModel>(context);
+    final showRemoteCursor = ShowRemoteCursorState.find(id).value;
+    // Ở chế độ Touch (touchMode == true), ẩn hoàn toàn lớp vẽ con trỏ chuột trên iPad
+    if (ffiModel.touchMode) {
+      return const Offstage();
+    }
     final s = c.scale;
     double hotx = m.hotx;
     double hoty = m.hoty;
     var image = m.image;
-    if (image == null) {
-      if (preDefaultCursor.image != null) {
-        image = preDefaultCursor.image;
-        hotx = preDefaultCursor.image!.width / 2;
-        hoty = preDefaultCursor.image!.height / 2;
-      }
-    }
+
     if (preForbiddenCursor.image != null &&
         !ffiModel.viewOnly &&
         !ffiModel.keyboard &&
-        !ShowRemoteCursorState.find(id).value) {
+        !showRemoteCursor) {
       image = preForbiddenCursor.image;
       hotx = preForbiddenCursor.image!.width / 2;
       hoty = preForbiddenCursor.image!.height / 2;
     }
+
+    final adjust = c.getAdjustY();
+    // If no custom remote cursor image is loaded, draw crisp macOS-style vector cursor!
     if (image == null) {
-      return Offstage();
+      final screenX = m.x * s + c.x;
+      final screenY = m.y * s + c.y + adjust;
+      return CustomPaint(
+        painter: _MacOSVectorCursorPainter(Offset(screenX, screenY)),
+      );
     }
 
     final minSize = 12.0;
@@ -1264,7 +2722,6 @@ class CursorPaint extends StatelessWidget {
       factor = s / mins;
     }
     final s2 = s < mins ? mins : s;
-    final adjust = c.getAdjustY();
     return CustomPaint(
       painter: ImagePainter(
           image: image,
@@ -1273,6 +2730,48 @@ class CursorPaint extends StatelessWidget {
           scale: s2),
     );
   }
+}
+
+class _MacOSVectorCursorPainter extends CustomPainter {
+  final Offset tip;
+  _MacOSVectorCursorPainter(this.tip);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.translate(tip.dx, tip.dy);
+    // Authentic macOS pointer geometry (black arrow with crisp white outline & drop shadow)
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(0, 21.5)
+      ..lineTo(4.8, 16.8)
+      ..lineTo(8.3, 24.5)
+      ..lineTo(11.2, 23.1)
+      ..lineTo(7.7, 15.3)
+      ..lineTo(14.2, 15.3)
+      ..close();
+
+    canvas.drawShadow(path, Colors.black.withOpacity(0.55), 3.0, false);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeJoin = StrokeJoin.round,
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black
+        ..style = PaintingStyle.fill,
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _MacOSVectorCursorPainter oldDelegate) =>
+      oldDelegate.tip != tip;
 }
 
 void showOptions(

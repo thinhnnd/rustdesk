@@ -1,13 +1,9 @@
-// These floating mouse widgets are used to simulate a physical mouse
-// when "mobile" -> "desktop" in mouse mode.
-// This file does not contain whole mouse widgets, it only contains
-// parts that help to control, such as wheel scroll and wheel button.
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
@@ -16,20 +12,20 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
 // Used for the wheel button and wheel scroll widgets
-const double _kSpaceToHorizontalEdge = 25;
-const double _wheelWidth = 50;
-const double _wheelHeight = 162;
-// Used for the left/right button widgets
-const double _kSpaceToVerticalEdge = 15;
-const double _kSpaceBetweenLeftRightButtons = 40;
-const double _kLeftRightButtonWidth = 55;
-const double _kLeftRightButtonHeight = 40;
-const double _kBorderWidth = 1;
-final Color _kDefaultBorderColor = Colors.white.withOpacity(0.7);
-final Color _kDefaultColor = Colors.black.withOpacity(0.4);
-final Color _kTapDownColor = Colors.blue.withOpacity(0.7);
-final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.9);
-const int _kInputTimerIntervalMillis = 100;
+const double _kSpaceToHorizontalEdge = 16;
+const double _wheelWidth = 44;
+const double _wheelHeight = 148;
+// Used for the DeskIn-style left/right button bar
+const double _kSpaceToVerticalEdge = 20;
+const double _kSpaceBetweenLeftRightButtons = 12;
+const double _kLeftRightButtonWidth = 76;
+const double _kLeftRightButtonHeight = 46;
+const double _kBorderWidth = 1.2;
+final Color _kDefaultBorderColor = Colors.white.withOpacity(0.55);
+final Color _kDefaultColor = const Color(0xFF1E222D).withOpacity(0.72);
+final Color _kTapDownColor = const Color(0xFF2B6CB0).withOpacity(0.88);
+final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.92);
+const int _kInputTimerIntervalMillis = 85;
 
 class FloatingMouseWidgets extends StatefulWidget {
   final FFI ffi;
@@ -73,30 +69,36 @@ class _FloatingMouseWidgetsState extends State<FloatingMouseWidgets> {
   @override
   Widget build(BuildContext context) {
     final virtualMouseMode = _virtualMouseMode;
-    if (!virtualMouseMode.showVirtualMouse) {
+    if (!virtualMouseMode.showVirtualMouse &&
+        !virtualMouseMode.showVirtualScrollWheel) {
       return const Offstage();
     }
     return Stack(
+      fit: StackFit.expand,
       children: [
-        FloatingWheel(
-          inputModel: _inputModel,
-          cursorModel: _cursorModel,
-        ),
-        if (virtualMouseMode.showVirtualJoystick)
+        if (virtualMouseMode.showVirtualScrollWheel)
+          FloatingWheel(
+            inputModel: _inputModel,
+            cursorModel: _cursorModel,
+          ),
+        if (virtualMouseMode.showVirtualMouse &&
+            virtualMouseMode.showVirtualJoystick)
           VirtualJoystick(
             cursorModel: _cursorModel,
             inputModel: _inputModel,
           ),
-        FloatingLeftRightButton(
-          isLeft: true,
-          inputModel: _inputModel,
-          cursorModel: _cursorModel,
-        ),
-        FloatingLeftRightButton(
-          isLeft: false,
-          inputModel: _inputModel,
-          cursorModel: _cursorModel,
-        ),
+        if (virtualMouseMode.showVirtualMouse) ...[
+          FloatingLeftRightButton(
+            isLeft: true,
+            inputModel: _inputModel,
+            cursorModel: _cursorModel,
+          ),
+          FloatingLeftRightButton(
+            isLeft: false,
+            inputModel: _inputModel,
+            cursorModel: _cursorModel,
+          ),
+        ],
       ],
     );
   }
@@ -120,6 +122,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
   bool _isUpDown = false;
   bool _isMidDown = false;
   bool _isDownDown = false;
+  double _swipeScrollAccum = 0.0;
 
   Orientation? _previousOrientation;
 
@@ -193,16 +196,16 @@ class _FloatingWheelState extends State<FloatingWheel> {
       onPointerCancel: onPointerCancel,
       child: Container(
         width: _wheelWidth,
-        height: 55,
+        height: 48,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: _kDefaultColor,
+          color: flagGetter() ? _kTapDownColor : _kDefaultColor,
           border: Border.all(
-              color: flagGetter() ? _kTapDownColor : _kDefaultBorderColor,
-              width: 1),
+              color: flagGetter() ? Colors.blueAccent : _kDefaultBorderColor,
+              width: _kBorderWidth),
           borderRadius: borderRadius,
         ),
-        child: Icon(iconData, color: _kDefaultBorderColor, size: 32),
+        child: Icon(iconData, color: _kWidgetHighlightColor, size: 26),
       ),
     );
   }
@@ -227,6 +230,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
         children: [
           _buildUpDownButton(
             (event) {
+              HapticFeedback.selectionClick();
               setState(() {
                 _isUpDown = true;
               });
@@ -246,72 +250,91 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             () => _isUpDown,
             BorderRadius.vertical(top: Radius.circular(_wheelWidth * 0.5)),
-            Icons.keyboard_arrow_up,
+            Icons.keyboard_arrow_up_rounded,
           ),
+          // Middle wheel: tap to middle-click, vertical drag to smooth scroll!
           Listener(
             onPointerDown: (event) {
+              _swipeScrollAccum = 0.0;
               setState(() {
                 _isMidDown = true;
               });
-              _inputModel.tapDown(MouseButtons.wheel);
+            },
+            onPointerMove: (event) {
+              _swipeScrollAccum += event.delta.dy;
+              while (_swipeScrollAccum <= -8.0) {
+                _inputModel.scroll(1);
+                _swipeScrollAccum += 8.0;
+              }
+              while (_swipeScrollAccum >= 8.0) {
+                _inputModel.scroll(-1);
+                _swipeScrollAccum -= 8.0;
+              }
             },
             onPointerUp: (event) {
+              if (_swipeScrollAccum.abs() < 4.0) {
+                HapticFeedback.lightImpact();
+                _inputModel.tap(MouseButtons.wheel);
+              }
               setState(() {
                 _isMidDown = false;
               });
-              _inputModel.tapUp(MouseButtons.wheel);
             },
             onPointerCancel: (event) {
               setState(() {
                 _isMidDown = false;
               });
-              _inputModel.tapUp(MouseButtons.wheel);
             },
             child: Container(
               width: _wheelWidth,
               height: 52,
               decoration: BoxDecoration(
-                color: _kDefaultColor,
+                color: _isMidDown ? _kTapDownColor : _kDefaultColor,
                 border: Border.symmetric(
                     vertical: BorderSide(
-                        color:
-                            _isMidDown ? _kTapDownColor : _kDefaultBorderColor,
+                        color: _isMidDown
+                            ? Colors.blueAccent
+                            : _kDefaultBorderColor,
                         width: _kBorderWidth)),
               ),
               child: Center(
-                child: Container(
-                  width: _wheelWidth - 10,
-                  height: _wheelWidth - 10,
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 18,
-                          height: 2,
-                          color: _kDefaultBorderColor,
-                        ),
-                        SizedBox(height: 6),
-                        Container(
-                          width: 24,
-                          height: 2,
-                          color: _kDefaultBorderColor,
-                        ),
-                        SizedBox(height: 6),
-                        Container(
-                          width: 18,
-                          height: 2,
-                          color: _kDefaultBorderColor,
-                        ),
-                      ],
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 14,
+                      height: 2,
+                      decoration: BoxDecoration(
+                        color: _kDefaultBorderColor,
+                        borderRadius: BorderRadius.circular(1),
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 5),
+                    Container(
+                      width: 20,
+                      height: 2.5,
+                      decoration: BoxDecoration(
+                        color: _kWidgetHighlightColor,
+                        borderRadius: BorderRadius.circular(1.5),
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Container(
+                      width: 14,
+                      height: 2,
+                      decoration: BoxDecoration(
+                        color: _kDefaultBorderColor,
+                        borderRadius: BorderRadius.circular(1),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
           _buildUpDownButton(
             (event) {
+              HapticFeedback.selectionClick();
               setState(() {
                 _isDownDown = true;
               });
@@ -331,7 +354,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             () => _isDownDown,
             BorderRadius.vertical(bottom: Radius.circular(_wheelWidth * 0.5)),
-            Icons.keyboard_arrow_down,
+            Icons.keyboard_arrow_down_rounded,
           ),
         ],
       ),
@@ -357,11 +380,12 @@ class FloatingLeftRightButton extends StatefulWidget {
   final bool isLeft;
   final InputModel inputModel;
   final CursorModel cursorModel;
-  const FloatingLeftRightButton(
-      {super.key,
-      required this.isLeft,
-      required this.inputModel,
-      required this.cursorModel});
+  const FloatingLeftRightButton({
+    super.key,
+    required this.isLeft,
+    required this.inputModel,
+    required this.cursorModel,
+  });
 
   @override
   State<FloatingLeftRightButton> createState() =>
@@ -371,22 +395,25 @@ class FloatingLeftRightButton extends StatefulWidget {
 class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
   Offset _position = Offset.zero;
   bool _isInitialized = false;
-  bool _isDown = false;
-  Object? _activePress;
+  bool _isPressed = false;
   bool _remoteButtonDown = false;
   Rect? _lastBlockedRect;
 
   Orientation? _previousOrientation;
   Offset _preSavedPos = Offset.zero;
 
-  // Gesture ambiguity resolution
-  Timer? _tapDownTimer;
-  final Duration _pressTimeout = const Duration(milliseconds: 200);
+  Offset _pointerDownGlobalPos = Offset.zero;
+  Timer? _holdClickTimer;
+  Timer? _longPressHintTimer;
+  bool _isMoveReady = false;
   bool _isDragging = false;
+  bool _isSecondFingerDragging = false;
 
   bool get _isLeft => widget.isLeft;
   InputModel get _inputModel => widget.inputModel;
   CursorModel get _cursorModel => widget.cursorModel;
+  MouseButtons get _mouseBtn =>
+      _isLeft ? MouseButtons.left : MouseButtons.right;
 
   @override
   void initState() {
@@ -400,17 +427,45 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
 
   @override
   void dispose() {
-    _activePress = null;
+    _holdClickTimer?.cancel();
+    _longPressHintTimer?.cancel();
+    if (identical(
+        onSpecialHoldSecondFingerStart, _onSecondFingerStartedOnCanvas)) {
+      onSpecialHoldSecondFingerStart = null;
+    }
     if (_remoteButtonDown) {
       _remoteButtonDown = false;
-      _inputModel.tapUp(_isLeft ? MouseButtons.left : MouseButtons.right);
+      _inputModel.tapUp(_mouseBtn);
+    }
+    if (_isPressed) {
+      isSpecialHoldDragActive = false;
+      isSpecialHoldDragCanvasMoving = false;
+      _cursorModel.blockEvents = false;
     }
     if (_lastBlockedRect != null) {
       _cursorModel.removeBlockedRect(_lastBlockedRect!);
     }
-    _tapDownTimer?.cancel();
     _trySavePosition();
     super.dispose();
+  }
+
+  void _onSecondFingerStartedOnCanvas() {
+    if (!mounted || !_isPressed || _isDragging) return;
+    _holdClickTimer?.cancel();
+    _longPressHintTimer?.cancel();
+    _isSecondFingerDragging = true;
+    if (_isMoveReady) {
+      setState(() {
+        _isMoveReady = false;
+      });
+    }
+    if (!_remoteButtonDown) {
+      _remoteButtonDown = true;
+      () async {
+        await _cursorModel.syncCursorPosition();
+        await _inputModel.tapDown(_mouseBtn);
+      }();
+    }
   }
 
   @override
@@ -445,7 +500,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     }
     try {
       final m = jsonDecode(s);
-      return Offset(m['x'], m['y']);
+      return Offset((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
     } catch (e) {
       debugPrintStack(label: 'Failed to load position "$s" $e');
       return null;
@@ -454,7 +509,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
 
   void _trySavePosition() {
     if (_previousOrientation == null) return;
-    if (((_position - _preSavedPos)).distanceSquared < 0.1) return;
+    if ((_position - _preSavedPos).distanceSquared < 0.1) return;
     final pos = jsonEncode({
       'x': _position.dx,
       'y': _position.dy,
@@ -467,13 +522,20 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
   void _restorePosition(Orientation ori) {
     final ps = bind.getLocalFlutterOption(k: _getPositionKey(ori));
     final pos = _loadPositionFromString(ps);
+    final size = MediaQuery.of(context).size;
     if (pos == null) {
-      final size = MediaQuery.of(context).size;
       _position = Offset(_getOffsetX(size.width),
-          size.height - _kSpaceToVerticalEdge - _kLeftRightButtonHeight);
+          size.height - _kSpaceToVerticalEdge - _kLeftRightButtonHeight - 40);
     } else {
-      _position = pos;
-      _preSavedPos = pos;
+      _position = Offset(
+        pos.dx
+            .clamp(8.0, max(8.0, size.width - _kLeftRightButtonWidth - 8.0))
+            .toDouble(),
+        pos.dy
+            .clamp(8.0, max(8.0, size.height - _kLeftRightButtonHeight - 8.0))
+            .toDouble(),
+      );
+      _preSavedPos = _position;
     }
   }
 
@@ -491,23 +553,22 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     if (_lastBlockedRect != null) {
       _cursorModel.removeBlockedRect(_lastBlockedRect!);
     }
-    final newRect = Rect.fromLTWH(_position.dx, _position.dy,
-        _kLeftRightButtonWidth, _kLeftRightButtonHeight);
+    final newRect = Rect.fromLTWH(_position.dx - 8, _position.dy - 8,
+        _kLeftRightButtonWidth + 16, _kLeftRightButtonHeight + 16);
     _cursorModel.addBlockedRect(newRect);
     _lastBlockedRect = newRect;
   }
 
   void _onMoveUpdateDelta(Offset delta) {
-    final context = this.context;
     final size = MediaQuery.of(context).size;
     Offset newPosition = _position + delta;
-    double minX = _kSpaceToHorizontalEdge;
-    double minY = _kSpaceToVerticalEdge;
-    double maxX = size.width - _kLeftRightButtonWidth - _kSpaceToHorizontalEdge;
-    double maxY = size.height - _kLeftRightButtonHeight - _kSpaceToVerticalEdge;
+    const double minX = 8.0;
+    const double minY = 8.0;
+    final double maxX = max(8.0, size.width - _kLeftRightButtonWidth - 8.0);
+    final double maxY = max(8.0, size.height - _kLeftRightButtonHeight - 8.0);
     newPosition = Offset(
-      newPosition.dx.clamp(minX, maxX),
-      newPosition.dy.clamp(minY, maxY),
+      newPosition.dx.clamp(minX, maxX).toDouble(),
+      newPosition.dy.clamp(minY, maxY).toDouble(),
     );
     final isPositionChanged = !(isDoubleEqual(newPosition.dx, _position.dx) &&
         isDoubleEqual(newPosition.dy, _position.dy));
@@ -521,46 +582,119 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     }
   }
 
-  void _onBodyPointerMoveUpdate(PointerMoveEvent event) {
-    _cursorModel.blockEvents = true;
-    // If move, it's a drag, not a tap.
-    _isDragging = true;
-    // Cancel the timer to prevent it from being recognized as a tap/hold.
-    _tapDownTimer?.cancel();
-    _tapDownTimer = null;
-    _onMoveUpdateDelta(event.delta);
+  void _handlePointerDown(PointerDownEvent event) {
+    HapticFeedback.lightImpact();
+    _holdClickTimer?.cancel();
+    _longPressHintTimer?.cancel();
+    _pointerDownGlobalPos = event.position;
+    _isDragging = false;
+    _isMoveReady = false;
+    _isSecondFingerDragging = false;
+    _remoteButtonDown = false;
+    isSpecialHoldDragActive = true;
+    isSpecialHoldDragCanvasMoving = false;
+    onSpecialHoldSecondFingerStart = _onSecondFingerStartedOnCanvas;
+    setState(() {
+      _isPressed = true;
+    });
+
+    // Khi giữ nút L (chuột trái), tự động gửi tapDown sau 90ms để sẵn sàng
+    // cho thao tác tay phải di trên màn hình bôi đen văn bản / kéo thả (DeskIn style).
+    if (_isLeft) {
+      _holdClickTimer = Timer(const Duration(milliseconds: 90), () async {
+        if (!mounted || !_isPressed || _isDragging || _remoteButtonDown) {
+          return;
+        }
+        _remoteButtonDown = true;
+        await _cursorModel.syncCursorPosition();
+        await _inputModel.tapDown(_mouseBtn);
+      });
+    }
+
+    // Sau 240ms nhấn giữ bằng 1 ngón (nếu chưa dùng ngón thứ 2 kéo trên canvas),
+    // rung nhẹ báo hiệu có thể kéo di chuyển nút L hoặc R độc lập.
+    _longPressHintTimer = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted ||
+          !_isPressed ||
+          _isDragging ||
+          _isSecondFingerDragging ||
+          isSpecialHoldDragCanvasMoving) {
+        return;
+      }
+      HapticFeedback.mediumImpact();
+      setState(() {
+        _isMoveReady = true;
+      });
+    });
   }
 
-  Widget _buildButtonIcon() {
-    final double w = _kLeftRightButtonWidth * 0.45;
-    final double h = _kLeftRightButtonHeight * 0.75;
-    final double borderRadius = w * 0.5;
-    final double quarterCircleRadius = borderRadius * 0.9;
-    return Stack(
-      children: [
-        Container(
-          width: w,
-          height: h,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(_kLeftRightButtonWidth * 0.225),
-            color: Colors.white,
-          ),
-        ),
-        Positioned(
-          left: _isLeft ? quarterCircleRadius * 0.25 : null,
-          right: _isLeft ? null : quarterCircleRadius * 0.25,
-          top: quarterCircleRadius * 0.25,
-          child: CustomPaint(
-            size: Size(quarterCircleRadius * 2, quarterCircleRadius * 2),
-            painter: _QuarterCirclePainter(
-              color: _kDefaultColor,
-              isLeft: _isLeft,
-              radius: quarterCircleRadius,
-            ),
-          ),
-        ),
-      ],
-    );
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (!_isPressed) return;
+    if (_isSecondFingerDragging || isSpecialHoldDragCanvasMoving) {
+      return;
+    }
+    final dist = (event.position - _pointerDownGlobalPos).distance;
+    // Chỉ chuyển sang chế độ kéo di chuyển vị trí nút L/R khi ngón tay đặt trên nút
+    // thực sự dịch chuyển > 8px (tránh micro-move 0px của iOS khi đang giữ yên nút L).
+    if (_isDragging || dist > 8.0) {
+      if (!_isDragging) {
+        _isDragging = true;
+        _holdClickTimer?.cancel();
+        _longPressHintTimer?.cancel();
+        _cursorModel.blockEvents = true;
+        isSpecialHoldDragActive = false;
+        if (_remoteButtonDown) {
+          _remoteButtonDown = false;
+          _inputModel.tapUp(_mouseBtn);
+        }
+        if (!_isMoveReady) {
+          HapticFeedback.selectionClick();
+        }
+        setState(() {
+          _isMoveReady = true;
+        });
+      }
+      _onMoveUpdateDelta(event.delta);
+    }
+  }
+
+  Future<void> _handlePointerUpOrCancel({required bool isCancel}) async {
+    _holdClickTimer?.cancel();
+    _longPressHintTimer?.cancel();
+    if (identical(
+        onSpecialHoldSecondFingerStart, _onSecondFingerStartedOnCanvas)) {
+      onSpecialHoldSecondFingerStart = null;
+    }
+    if (!mounted) return;
+    final wasPressed = _isPressed;
+    final wasDragging = _isDragging;
+    final wasRemoteDown = _remoteButtonDown;
+
+    _isPressed = false;
+    _isDragging = false;
+    _isMoveReady = false;
+    _isSecondFingerDragging = false;
+    _remoteButtonDown = false;
+    isSpecialHoldDragActive = false;
+    isSpecialHoldDragCanvasMoving = false;
+    _cursorModel.blockEvents = false;
+
+    setState(() {});
+
+    if (wasDragging) {
+      _trySavePosition();
+      return;
+    }
+    if (!wasPressed) return;
+
+    if (wasRemoteDown) {
+      await _inputModel.tapUp(_mouseBtn);
+    } else if (!isCancel) {
+      await _cursorModel.syncCursorPosition();
+      await _inputModel.tapDown(_mouseBtn);
+      await Future.delayed(const Duration(milliseconds: 45));
+      await _inputModel.tapUp(_mouseBtn);
+    }
   }
 
   @override
@@ -568,129 +702,76 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     if (!_isInitialized) {
       return Positioned(child: Offstage());
     }
+    final isDown = _isPressed && !_isDragging;
+    final highlightBorder = _isDragging || _isMoveReady || isDown;
+
     return Positioned(
       left: _position.dx,
       top: _position.dy,
-      // We can't use the GestureDetector here, because `onTapDown` may be
-      // triggered sometimes when dragging.
-      child: Listener(
-        onPointerMove: _onBodyPointerMoveUpdate,
-        onPointerDown: (event) async {
-          final press = Object();
-          _activePress = press;
-          _isDragging = false;
-          setState(() {
-            _isDown = true;
-          });
-          // Start a timer. If it fires, it's a hold.
-          _tapDownTimer?.cancel();
-          _tapDownTimer = Timer(_pressTimeout, () {
-            isSpecialHoldDragActive = true;
-            () async {
-              await _cursorModel.syncCursorPosition();
-              if (!mounted || !identical(_activePress, press)) return;
-              _remoteButtonDown = true;
-              await _inputModel
-                  .tapDown(_isLeft ? MouseButtons.left : MouseButtons.right);
-            }();
-            _tapDownTimer = null;
-          });
-        },
-        onPointerUp: (event) {
-          if (!mounted) return;
-          _activePress = null;
-          _cursorModel.blockEvents = false;
-          setState(() {
-            _isDown = false;
-          });
-          // If timer is active, it's a quick tap.
-          if (_tapDownTimer != null) {
-            _tapDownTimer!.cancel();
-            _tapDownTimer = null;
-            // Fire tap down and up quickly.
-            _inputModel
-                .tapDown(_isLeft ? MouseButtons.left : MouseButtons.right)
-                .then(
-                    (_) => Future.delayed(const Duration(milliseconds: 50), () {
-                          _inputModel.tapUp(
-                              _isLeft ? MouseButtons.left : MouseButtons.right);
-                        }));
-          } else {
-            // If it's not a quick tap, it could be a hold or drag.
-            if (_remoteButtonDown) {
-              _remoteButtonDown = false;
-              _inputModel
-                  .tapUp(_isLeft ? MouseButtons.left : MouseButtons.right);
-            }
-          }
-
-          if (_isDragging) {
-            _trySavePosition();
-          }
-          isSpecialHoldDragActive = false;
-        },
-        onPointerCancel: (event) {
-          if (!mounted) return;
-          _activePress = null;
-          _cursorModel.blockEvents = false;
-          setState(() {
-            _isDown = false;
-          });
-          _tapDownTimer?.cancel();
-          _tapDownTimer = null;
-          if (_remoteButtonDown) {
-            _remoteButtonDown = false;
-            _inputModel.tapUp(_isLeft ? MouseButtons.left : MouseButtons.right);
-          }
-          isSpecialHoldDragActive = false;
-          if (_isDragging) {
-            _trySavePosition();
-          }
-        },
-        child: Container(
-          width: _kLeftRightButtonWidth,
-          height: _kLeftRightButtonHeight,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: _kDefaultColor,
-            border: Border.all(
-                color: _isDown ? _kTapDownColor : _kDefaultBorderColor,
-                width: _kBorderWidth),
-            borderRadius: _isLeft
-                ? BorderRadius.horizontal(
-                    left: Radius.circular(_kLeftRightButtonHeight * 0.5))
-                : BorderRadius.horizontal(
-                    right: Radius.circular(_kLeftRightButtonHeight * 0.5)),
+      child: AnimatedScale(
+        scale: (_isDragging || _isMoveReady) ? 1.08 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: _handlePointerDown,
+          onPointerMove: _handlePointerMove,
+          onPointerUp: (_) => _handlePointerUpOrCancel(isCancel: false),
+          onPointerCancel: (_) => _handlePointerUpOrCancel(isCancel: true),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 90),
+            width: _kLeftRightButtonWidth,
+            height: _kLeftRightButtonHeight,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: isDown ? _kTapDownColor : _kDefaultColor,
+              border: Border.all(
+                color: highlightBorder
+                    ? Colors.lightBlueAccent
+                    : _kDefaultBorderColor,
+                width: highlightBorder ? 1.8 : _kBorderWidth,
+              ),
+              borderRadius: _isLeft
+                  ? const BorderRadius.horizontal(
+                      left: Radius.circular(23),
+                      right: Radius.circular(8),
+                    )
+                  : const BorderRadius.horizontal(
+                      left: Radius.circular(8),
+                      right: Radius.circular(23),
+                    ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(_isDragging ? 0.45 : 0.28),
+                  blurRadius: _isDragging ? 12 : 6,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.mouse_outlined,
+                  size: 16,
+                  color: isDown ? Colors.white : Colors.white70,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  _isLeft ? 'L' : 'R',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
           ),
-          child: _buildButtonIcon(),
         ),
       ),
     );
   }
-}
-
-class _QuarterCirclePainter extends CustomPainter {
-  final Color color;
-  final bool isLeft;
-  final double radius;
-  _QuarterCirclePainter(
-      {required this.color, required this.isLeft, required this.radius});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
-    final rect = Rect.fromLTWH(0, 0, radius * 2, radius * 2);
-    if (isLeft) {
-      canvas.drawArc(rect, -pi, pi / 2, true, paint);
-    } else {
-      canvas.drawArc(rect, -pi / 2, pi / 2, true, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(CustomPainter oldDelegate) => false;
 }
 
 // Virtual joystick can send either absolute movement (via updatePan)

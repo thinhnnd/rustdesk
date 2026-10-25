@@ -1849,12 +1849,24 @@ class FfiModel with ChangeNotifier {
 }
 
 class VirtualMouseMode with ChangeNotifier {
-  bool _showVirtualMouse = false;
+  static const String _kOptionShowVirtualScrollWheel =
+      'show-virtual-scroll-wheel';
+  static const String _kOptionShowTouchVirtualMouse =
+      'show-touch-virtual-mouse';
+  static const String _kOptionMobileCursorSpeed = 'mobile-cursor-speed';
+
+  bool _showVirtualMouse = true;
+  bool _showTouchVirtualMouse = false;
+  bool _showVirtualScrollWheel = true;
   double _virtualMouseScale = 1.0;
+  double _cursorSpeed = 1.0;
   bool _showVirtualJoystick = false;
 
   bool get showVirtualMouse => _showVirtualMouse;
+  bool get showTouchVirtualMouse => _showTouchVirtualMouse;
+  bool get showVirtualScrollWheel => _showVirtualScrollWheel;
   double get virtualMouseScale => _virtualMouseScale;
+  double get cursorSpeed => _cursorSpeed;
   bool get showVirtualJoystick => _showVirtualJoystick;
 
   FfiModel ffiModel;
@@ -1871,11 +1883,36 @@ class VirtualMouseMode with ChangeNotifier {
     }
   }
 
+  setShowTouchVirtualMouse(bool b) {
+    if (b == _showTouchVirtualMouse) return;
+    if (_shouldShow()) {
+      _showTouchVirtualMouse = b;
+      notifyListeners();
+    }
+  }
+
+  setShowVirtualScrollWheel(bool b) {
+    if (b == _showVirtualScrollWheel) return;
+    if (_shouldShow()) {
+      _showVirtualScrollWheel = b;
+      notifyListeners();
+    }
+  }
+
   setVirtualMouseScale(double s) {
     if (s <= 0) return;
     if (s == _virtualMouseScale) return;
     _virtualMouseScale = s;
     bind.mainSetLocalOption(key: kOptionVirtualMouseScale, value: s.toString());
+    notifyListeners();
+  }
+
+  setCursorSpeed(double s) {
+    final clamped = s.clamp(0.4, 2.5).toDouble();
+    if (clamped == _cursorSpeed) return;
+    _cursorSpeed = clamped;
+    bind.mainSetLocalOption(
+        key: _kOptionMobileCursorSpeed, value: clamped.toString());
     notifyListeners();
   }
 
@@ -1888,10 +1925,22 @@ class VirtualMouseMode with ChangeNotifier {
   }
 
   void loadOptions() {
-    _showVirtualMouse =
-        bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y';
+    final savedOpt = bind.mainGetLocalOption(key: kOptionShowVirtualMouse);
+    // Default to true (show L/R buttons in mouse mode) unless explicitly disabled ('N')
+    _showVirtualMouse = savedOpt.isEmpty ? true : savedOpt == 'Y';
+    final savedTouchOpt =
+        bind.mainGetLocalOption(key: _kOptionShowTouchVirtualMouse);
+    // Default to false in Touch mode (just like DeskIn) unless explicitly enabled ('Y')
+    _showTouchVirtualMouse = savedTouchOpt == 'Y';
+    final savedWheelOpt =
+        bind.mainGetLocalOption(key: _kOptionShowVirtualScrollWheel);
+    _showVirtualScrollWheel =
+        savedWheelOpt.isEmpty ? true : savedWheelOpt == 'Y';
     _virtualMouseScale = double.tryParse(
             bind.mainGetLocalOption(key: kOptionVirtualMouseScale)) ??
+        1.0;
+    _cursorSpeed = double.tryParse(
+            bind.mainGetLocalOption(key: _kOptionMobileCursorSpeed)) ??
         1.0;
     _showVirtualJoystick =
         bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y';
@@ -1903,6 +1952,22 @@ class VirtualMouseMode with ChangeNotifier {
         key: kOptionShowVirtualMouse, value: showVirtualMouse ? 'N' : 'Y');
     setShowVirtualMouse(
         bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y');
+  }
+
+  Future<void> toggleTouchVirtualMouse() async {
+    await bind.mainSetLocalOption(
+        key: _kOptionShowTouchVirtualMouse,
+        value: showTouchVirtualMouse ? 'N' : 'Y');
+    setShowTouchVirtualMouse(
+        bind.mainGetLocalOption(key: _kOptionShowTouchVirtualMouse) == 'Y');
+  }
+
+  Future<void> toggleVirtualScrollWheel() async {
+    await bind.mainSetLocalOption(
+        key: _kOptionShowVirtualScrollWheel,
+        value: showVirtualScrollWheel ? 'N' : 'Y');
+    setShowVirtualScrollWheel(
+        bind.mainGetLocalOption(key: _kOptionShowVirtualScrollWheel) == 'Y');
   }
 
   Future<void> toggleVirtualJoystick() async {
@@ -2021,20 +2086,28 @@ class ImageModel with ChangeNotifier {
 
   // mobile only
   double get maxScale {
-    if (_image == null) return 1.5;
+    if (_image == null) return 3.0;
     final size = parent.target!.canvasModel.getSize();
+    if (size.width <= 0 || size.height <= 0) return 3.0;
     final xscale = size.width / _image!.width;
     final yscale = size.height / _image!.height;
-    return max(1.5, max(xscale, yscale));
+    return max(3.0, max(xscale, yscale) * 3.0);
   }
 
-  // mobile only
+  // mobile only: DeskIn behavior — minimum zoom is Fit-to-Screen (never smaller)
   double get minScale {
-    if (_image == null) return 1.5;
-    final size = parent.target!.canvasModel.getSize();
-    final xscale = size.width / _image!.width;
-    final yscale = size.height / _image!.height;
-    return min(xscale, yscale) / 1.5;
+    if (_image == null) return 1.0;
+    final mediaData = MediaQueryData.fromView(ui.window);
+    final w = mediaData.size.width -
+        mediaData.padding.left -
+        mediaData.padding.right;
+    final isPortrait = mediaData.size.height > mediaData.size.width;
+    final h =
+        mediaData.size.height - (isPortrait ? mediaData.padding.top : 0.0);
+    if (w <= 0 || h <= 0) return 1.0;
+    final xscale = w / _image!.width;
+    final yscale = h / _image!.height;
+    return min(xscale, yscale);
   }
 
   updateUserTextureRender() {
@@ -2345,10 +2418,10 @@ class CanvasModel with ChangeNotifier {
       // Account for horizontal safe area insets on both orientations.
       w = w - mediaData.padding.left - mediaData.padding.right;
       // Vertically, subtract the bottom keyboard inset (viewInsets.bottom) and any
-      // bottom overlay (e.g. key-help tools) so the canvas is not covered.
+      // bottom overlay height (e.g. key-help tools at bottom) so the canvas is not covered.
       h = h -
           mediaData.viewInsets.bottom -
-          (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.bottom ??
+          (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.height ??
               0);
       // Orientation-specific handling:
       //  - Portrait: additionally subtract top padding (e.g. status bar / notch)
@@ -2372,11 +2445,10 @@ class CanvasModel with ChangeNotifier {
     return Size(w < 0 ? 0 : w, h < 0 ? 0 : h);
   }
 
-  // mobile only
+  // mobile only: KeyHelpTools is positioned at the bottom above the keyboard (DeskIn style),
+  // so top Y offset adjustment is 0.
   double getAdjustY() {
-    final bottom =
-        parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.bottom ?? 0;
-    return max(bottom - MediaQueryData.fromView(ui.window).padding.top, 0);
+    return 0.0;
   }
 
   updateSize() => _size = getSize();
@@ -2554,32 +2626,53 @@ class CanvasModel with ChangeNotifier {
   }
 
   void moveDesktopMouse(double x, double y) {
+    updateSize();
     if (size.width == 0 || size.height == 0) {
       return;
     }
 
-    // On mobile platforms, move the canvas with the cursor.
+    // DeskIn-style Edge-Push Deadzone:
+    // Keep a comfortable 22% top/bottom and 18% left/right margin so the user
+    // doesn't have to push the cursor all the way to the physical bezel.
     final dw = getDisplayWidth() * _scale;
     final dh = getDisplayHeight() * _scale;
-    var dxOffset = 0;
-    var dyOffset = 0;
-    try {
-      if (dw > size.width) {
-        dxOffset = (x - dw * (x / size.width) - _x).toInt();
+    final edgeX = size.width * 0.18;
+    final edgeY = size.height * 0.24;
+    double newX = _x;
+    double newY = _y;
+
+    if (dw > size.width) {
+      if (x > size.width - edgeX) {
+        final ratio = ((x - (size.width - edgeX)) / edgeX).clamp(0.0, 1.0);
+        final targetMinX = size.width - dw;
+        newX = min(_x, _x - (x - (size.width - edgeX)) * 0.6)
+            .clamp(targetMinX, 0.0);
+        if (ratio >= 0.98) newX = targetMinX;
+      } else if (x < edgeX) {
+        final ratio = ((edgeX - x) / edgeX).clamp(0.0, 1.0);
+        newX = max(_x, _x + (edgeX - x) * 0.6).clamp(size.width - dw, 0.0);
+        if (ratio >= 0.98) newX = 0.0;
       }
-      if (dh > size.height) {
-        dyOffset = (y - dh * (y / size.height) - _y).toInt();
-      }
-    } catch (e) {
-      debugPrintStack(
-          label:
-              '(x,y) ($x,$y), (_x,_y) ($_x,$_y), _scale $_scale, display size (${getDisplayWidth()},${getDisplayHeight()}), size $size, , $e');
-      return;
     }
 
-    _x += dxOffset;
-    _y += dyOffset;
-    if (dxOffset != 0 || dyOffset != 0) {
+    if (dh > size.height) {
+      if (y > size.height - edgeY) {
+        final ratio = ((y - (size.height - edgeY)) / edgeY).clamp(0.0, 1.0);
+        final targetMinY = size.height - dh;
+        newY = min(_y, _y - (y - (size.height - edgeY)) * 0.6)
+            .clamp(targetMinY, 0.0);
+        if (ratio >= 0.98) newY = targetMinY;
+      } else if (y < edgeY) {
+        final ratio = ((edgeY - y) / edgeY).clamp(0.0, 1.0);
+        newY = max(_y, _y + (edgeY - y) * 0.6).clamp(size.height - dh, 0.0);
+        if (ratio >= 0.98) newY = 0.0;
+      }
+    }
+
+    if ((newX - _x).abs() > 0.1 || (newY - _y).abs() > 0.1) {
+      _x = newX;
+      _y = newY;
+      _clampAndCenterCanvasOffset();
       notifyListeners();
     }
   }
@@ -2707,9 +2800,34 @@ class CanvasModel with ChangeNotifier {
     notifyListeners();
   }
 
+  void _clampAndCenterCanvasOffset() {
+    if (!isMobile) return;
+    updateSize();
+    if (_size.width <= 0 || _size.height <= 0) return;
+
+    final dw = getDisplayWidth() * _scale;
+    final dh = getDisplayHeight() * _scale;
+
+    // DeskIn behavior:
+    // - If scaled display fits within viewport along an axis, lock it centered.
+    // - If zoomed in larger than viewport, clamp offset to [viewport - scaledDisplay, 0].
+    if (dw <= _size.width) {
+      _x = (_size.width - dw) / 2.0;
+    } else {
+      _x = _x.clamp(_size.width - dw, 0.0);
+    }
+
+    if (dh <= _size.height) {
+      _y = (_size.height - dh) / 2.0;
+    } else {
+      _y = _y.clamp(_size.height - dh, 0.0);
+    }
+  }
+
   panX(double dx) {
     _x += dx;
     if (isMobile) {
+      _clampAndCenterCanvasOffset();
       isMobileCanvasChanged = true;
     }
     notifyListeners();
@@ -2727,6 +2845,7 @@ class CanvasModel with ChangeNotifier {
   panY(double dy) {
     _y += dy;
     if (isMobile) {
+      _clampAndCenterCanvasOffset();
       isMobileCanvasChanged = true;
     }
     notifyListeners();
@@ -2749,6 +2868,7 @@ class CanvasModel with ChangeNotifier {
     // _y_2 = focalPoint.dy - adjust - (focalPoint.dy - _y_1 - adjust) / s1 * s2
     _y = focalPoint.dy - adjust - (focalPoint.dy - _y - adjust) / s * _scale;
     if (isMobile) {
+      _clampAndCenterCanvasOffset();
       isMobileCanvasChanged = true;
     }
     notifyListeners();
@@ -3367,66 +3487,22 @@ class CursorModel with ChangeNotifier {
     double dy = delta.dy;
     if (parent.target?.imageModel.image == null) return;
     final scale = parent.target?.canvasModel.scale ?? 1.0;
-    dx /= scale;
-    dy /= scale;
-    final r = getVisibleRect();
-    var cx = r.center.dx;
-    var cy = r.center.dy;
-    var tryMoveCanvasX = false;
-    final displayRect = parent.target?.ffiModel.rect;
-    if (dx > 0) {
-      final maxCanvasCanMove = _displayOriginX +
-          (displayRect?.width ?? 1280) -
-          r.right.roundToDouble();
-      tryMoveCanvasX = _x + dx > cx && maxCanvasCanMove > 0;
-      if (tryMoveCanvasX) {
-        dx = min(dx, maxCanvasCanMove);
-      } else {
-        final maxCursorCanMove = r.right - _x;
-        dx = min(dx, maxCursorCanMove);
-      }
-    } else if (dx < 0) {
-      final maxCanvasCanMove = _displayOriginX - r.left.roundToDouble();
-      tryMoveCanvasX = _x + dx < cx && maxCanvasCanMove < 0;
-      if (tryMoveCanvasX) {
-        dx = max(dx, maxCanvasCanMove);
-      } else {
-        final maxCursorCanMove = r.left - _x;
-        dx = max(dx, maxCursorCanMove);
-      }
-    }
-    var tryMoveCanvasY = false;
-    if (dy > 0) {
-      final mayCanvasCanMove = _displayOriginY +
-          (displayRect?.height ?? 720) -
-          r.bottom.roundToDouble();
-      tryMoveCanvasY = _y + dy > cy && mayCanvasCanMove > 0;
-      if (tryMoveCanvasY) {
-        dy = min(dy, mayCanvasCanMove);
-      } else {
-        final mayCursorCanMove = r.bottom - _y;
-        dy = min(dy, mayCursorCanMove);
-      }
-    } else if (dy < 0) {
-      final mayCanvasCanMove = _displayOriginY - r.top.roundToDouble();
-      tryMoveCanvasY = _y + dy < cy && mayCanvasCanMove < 0;
-      if (tryMoveCanvasY) {
-        dy = max(dy, mayCanvasCanMove);
-      } else {
-        final mayCursorCanMove = r.top - _y;
-        dy = max(dy, mayCursorCanMove);
-      }
-    }
+    // DeskIn-style smooth trackpad pointer acceleration:
+    // Small movements stay pixel-accurate (1.15x base), fast swipes accelerate smoothly up to 2.85x.
+    final speed = delta.distance;
+    final speedMultiplier =
+        parent.target?.ffiModel.virtualMouseMode.cursorSpeed ?? 1.0;
+    final accel =
+        (1.15 + (speed * 0.085)).clamp(1.15, 2.85) * speedMultiplier;
+    dx = (dx * accel) / scale;
+    dy = (dy * accel) / scale;
 
-    if (dx == 0 && dy == 0) return;
-
-    Point<double>? newPos;
     final rect = parent.target?.ffiModel.rect;
     if (rect == null) {
-      // unreachable
       return;
     }
-    newPos = InputModel.getPointInRemoteRect(
+
+    final newPos = InputModel.getPointInRemoteRect(
         false,
         parent.target?.ffiModel.pi.platform,
         kPointerEventKindMouse,
@@ -3438,15 +3514,67 @@ class CursorModel with ChangeNotifier {
     if (newPos == null) {
       return;
     }
-    dx = newPos.x - _x;
-    dy = newPos.y - _y;
+
     _x = newPos.x;
     _y = newPos.y;
-    if (tryMoveCanvasX && dx != 0) {
-      parent.target?.canvasModel.panX(-dx * scale);
+
+    // DeskIn-style Edge-Push Deadzone:
+    // Leave a comfortable 25% top/bottom margin and 20% left/right margin so the user
+    // doesn't have to push the cursor all the way to the top/bottom bezel.
+    // When moving up from the bottom, the screen stays still until the cursor crosses
+    // above the top 25% threshold, then glides smoothly 1:1 with the cursor.
+    final r = getVisibleRect();
+    final padX = r.width * 0.20;
+    final padY = r.height * 0.25;
+    double panScreenX = 0.0;
+    double panScreenY = 0.0;
+
+    if (dx > 0 && _x > r.right - padX) {
+      final step = min(dx, _x - (r.right - padX));
+      final maxMoveRight = (_displayOriginX + rect.width) - r.right;
+      if (maxMoveRight > 0) {
+        panScreenX = -min(step, maxMoveRight) * scale;
+      }
+    } else if (dx < 0 && _x < r.left + padX) {
+      final step = min(-dx, (r.left + padX) - _x);
+      final maxMoveLeft = r.left - _displayOriginX;
+      if (maxMoveLeft > 0) {
+        panScreenX = min(step, maxMoveLeft) * scale;
+      }
     }
-    if (tryMoveCanvasY && dy != 0) {
-      parent.target?.canvasModel.panY(-dy * scale);
+
+    if (dy > 0 && _y > r.bottom - padY) {
+      final step = min(dy, _y - (r.bottom - padY));
+      final maxMoveDown = (_displayOriginY + rect.height) - r.bottom;
+      if (maxMoveDown > 0) {
+        panScreenY = -min(step, maxMoveDown) * scale;
+      }
+    } else if (dy < 0 && _y < r.top + padY) {
+      final step = min(-dy, (r.top + padY) - _y);
+      final maxMoveUp = r.top - _displayOriginY;
+      if (maxMoveUp > 0) {
+        panScreenY = min(step, maxMoveUp) * scale;
+      }
+    }
+
+    if (panScreenX.abs() > 0.01) {
+      parent.target?.canvasModel.panX(panScreenX);
+    }
+    if (panScreenY.abs() > 0.01) {
+      parent.target?.canvasModel.panY(panScreenY);
+    }
+
+    // Ensure the cursor never escapes outside the visible viewport after panning:
+    final rAfter = getVisibleRect();
+    final minVisibleX = max(rect.left, rAfter.left);
+    final maxVisibleX = min(rect.right - 1, rAfter.right);
+    final minVisibleY = max(rect.top, rAfter.top);
+    final maxVisibleY = min(rect.bottom - 1, rAfter.bottom);
+    if (minVisibleX <= maxVisibleX) {
+      _x = _x.clamp(minVisibleX, maxVisibleX);
+    }
+    if (minVisibleY <= maxVisibleY) {
+      _y = _y.clamp(minVisibleY, maxVisibleY);
     }
 
     parent.target?.inputModel.moveMouse(_x, _y);

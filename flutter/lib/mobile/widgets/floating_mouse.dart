@@ -253,7 +253,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
   void _onVirtualMouseModeChanged() {
     if (mounted) {
       setState(() {
-        if (_virtualMouseMode.showVirtualMouse) {
+        if (_virtualMouseMode.showTouchVirtualMouse) {
           _isExpanded = true;
           _resetCollapseTimer();
         }
@@ -588,7 +588,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
       return const Offstage();
     }
     final virtualMouseMode = _virtualMouseMode;
-    if (!virtualMouseMode.showVirtualMouse) {
+    if (!virtualMouseMode.showTouchVirtualMouse) {
       return const Offstage();
     }
     _baseMouseScale = virtualMouseMode.virtualMouseScale;

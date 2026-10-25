@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -55,6 +56,8 @@ class RawKeyFocusScope extends StatelessWidget {
 // Special hold-drag mode: one finger holds a button (left/right button), another finger pans.
 // This flag is to override the scale gesture to a pan gesture.
 bool isSpecialHoldDragActive = false;
+bool isSpecialHoldDragCanvasMoving = false;
+VoidCallback? onSpecialHoldSecondFingerStart;
 // Cache the last focal point to calculate deltas in special hold-drag mode.
 Offset _lastSpecialHoldDragFocalPoint = Offset.zero;
 
@@ -102,6 +105,13 @@ class _RawTouchGestureDetectorRegionState
   // `onDoubleTap()` does not provide the position of the tap event.
   Offset _lastPosOfDoubleTapDown = Offset.zero;
   bool _touchModePanStarted = false;
+  bool _touchModePanIsCanvasMove = false;
+  int _touchModeDownTimeMs = 0;
+  Offset _touchModeDownLocalPos = Offset.zero;
+  Timer? _shortPressDragHintTimer;
+  bool _longPressTriggeredRightClick = false;
+  double _threeFingerAccumDx = 0.0;
+  bool _threeFingerSwitchedScreen = false;
   Offset _doubleFinerTapPosition = Offset.zero;
 
   // For mouse mode, we need to block the events when the cursor is in a blocked area.
@@ -117,11 +127,80 @@ class _RawTouchGestureDetectorRegionState
   SessionID get sessionId => ffi.sessionId;
   bool get canvasLocked => isMobile && ffi.canvasModel.locked;
 
+  String? _zoomToastMessage;
+  Timer? _zoomToastTimer;
+  bool _zoomLimitToastShownInGesture = false;
+
+  void _showZoomToast(String message, {bool force = false}) {
+    if (_zoomLimitToastShownInGesture && !force) return;
+    _zoomLimitToastShownInGesture = true;
+    _zoomToastTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _zoomToastMessage = message;
+      });
+    }
+    _zoomToastTimer = Timer(const Duration(milliseconds: 950), () {
+      if (mounted) {
+        setState(() {
+          _zoomToastMessage = null;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _zoomToastTimer?.cancel();
+    _shortPressDragHintTimer?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return RawGestureDetector(
-      child: widget.child,
-      gestures: makeGestures(context),
+    return Stack(
+      children: [
+        RawGestureDetector(
+          child: widget.child,
+          gestures: makeGestures(context),
+        ),
+        if (isMobile)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: AnimatedOpacity(
+                  opacity: _zoomToastMessage != null ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 160),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: const Color(0xD93A3D45),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.white12, width: 0.8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.28),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      _zoomToastMessage ?? '',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w500,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -147,12 +226,25 @@ class _RawTouchGestureDetectorRegionState
       _lastPosOfDoubleTapDown = d.localPosition;
       // Desktop or mobile "Touch mode"
       _lastTapDownDetails = d;
+      _touchModeDownTimeMs = DateTime.now().millisecondsSinceEpoch;
+      _touchModeDownLocalPos = d.localPosition;
+      _longPressTriggeredRightClick = false;
+      _shortPressDragHintTimer?.cancel();
+      if (isMobile && ffi.cursorModel.isInRemoteRect(d.localPosition)) {
+        _shortPressDragHintTimer =
+            Timer(const Duration(milliseconds: 155), () {
+          if (mounted && !_touchModePanStarted) {
+            HapticFeedback.selectionClick();
+          }
+        });
+      }
     } else {
       _lastTapDownPositionForMouseMode = d.localPosition;
     }
   }
 
   onTapUp(TapUpDetails d) async {
+    _shortPressDragHintTimer?.cancel();
     final TapDownDetails? lastTapDownDetails = _lastTapDownDetails;
     _lastTapDownDetails = null;
     if (isNotTouchBasedDevice()) {
@@ -237,6 +329,9 @@ class _RawTouchGestureDetectorRegionState
     if (handleTouch) {
       _lastPosOfDoubleTapDown = d.localPosition;
       _cacheLongPressPosition = d.localPosition;
+      _touchModeDownTimeMs = DateTime.now().millisecondsSinceEpoch;
+      _touchModeDownLocalPos = d.localPosition;
+      _longPressTriggeredRightClick = false;
       if (!ffi.cursorModel.isInRemoteRect(d.localPosition)) {
         return;
       }
@@ -252,26 +347,37 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onLongPressUp() async {
+    _shortPressDragHintTimer?.cancel();
     if (isNotTouchBasedDevice()) {
       return;
     }
     if (handleTouch) {
-      await inputModel.tapUp(MouseButtons.left);
+      if (_longPressTriggeredRightClick) {
+        _longPressTriggeredRightClick = false;
+        return;
+      }
+      if (ffiModel.isPeerMobile) {
+        await inputModel.tapUp(MouseButtons.left);
+      }
     }
   }
 
   // for mobiles
   onLongPress() async {
+    _shortPressDragHintTimer?.cancel();
     if (isNotTouchBasedDevice()) {
       return;
     }
     if (!ffi.ffiModel.isPeerMobile) {
       if (handleTouch) {
+        if (_touchModePanStarted) return;
         final isMoved = await ffi.cursorModel
             .move(_cacheLongPressPosition.dx, _cacheLongPressPosition.dy);
         if (!isMoved) {
           return;
         }
+        _longPressTriggeredRightClick = true;
+        HapticFeedback.mediumImpact();
       } else {
         if (shouldBlockMouseModeEvent()) {
           return;
@@ -286,7 +392,7 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onLongPressMoveUpdate(LongPressMoveUpdateDetails d) async {
-    if (!ffiModel.isPeerMobile || isNotTouchBasedDevice()) {
+    if (isNotTouchBasedDevice()) {
       return;
     }
     if (handleTouch) {
@@ -307,8 +413,20 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onDoubleFinerTap(TapDownDetails d) async {
+    _shortPressDragHintTimer?.cancel();
     lastDeviceKind = d.kind;
     if (isNotTouchBasedDevice()) {
+      return;
+    }
+
+    // DeskIn style: Hold and click (1 finger holds + 2nd finger taps, or 2-finger tap) = Right click
+    if (isMobile && ffiModel.touchMode) {
+      if (ffi.cursorModel.isInRemoteRect(_doubleFinerTapPosition)) {
+        HapticFeedback.mediumImpact();
+        await ffi.cursorModel
+            .move(_doubleFinerTapPosition.dx, _doubleFinerTapPosition.dy);
+        await inputModel.tap(MouseButtons.right);
+      }
       return;
     }
 
@@ -352,18 +470,27 @@ class _RawTouchGestureDetectorRegionState
     }
   }
 
+  bool _oneFingerPanBlocked = false;
+
   onOneFingerPanStart(BuildContext context, DragStartDetails d) async {
+    _shortPressDragHintTimer?.cancel();
     final TapDownDetails? lastTapDownDetails = _lastTapDownDetails;
     _lastTapDownDetails = null;
     lastDeviceKind = d.kind ?? lastDeviceKind;
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy) ||
+        shouldBlockMouseModeEvent()) {
+      _oneFingerPanBlocked = true;
+      return;
+    }
+    _oneFingerPanBlocked = false;
+    if (isSpecialHoldDragActive) {
+      isSpecialHoldDragCanvasMoving = true;
+      onSpecialHoldSecondFingerStart?.call();
+    }
     if (handleTouch) {
-      if (lastTapDownDetails != null) {
-        await ffi.cursorModel.move(lastTapDownDetails.localPosition.dx,
-            lastTapDownDetails.localPosition.dy);
-      }
       if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
         return;
       }
@@ -372,17 +499,31 @@ class _RawTouchGestureDetectorRegionState
       }
 
       _touchModePanStarted = true;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final heldMs = nowMs - _touchModeDownTimeMs;
+      final isZoomedIn =
+          ffi.canvasModel.scale > (ffi.imageModel.minScale + 0.01);
+
+      // DeskIn Touch Mode:
+      // - Khi đang phóng to (isZoomedIn) và vuốt 1 ngón ngay lập tức (heldMs < 140ms):
+      //   Trượt khung hình (Canvas Move) để xem quanh màn hình dễ dàng mà không làm trôi cửa sổ Mac.
+      // - Khi nhấn giữ nhẹ rồi kéo ("Short press and drag", heldMs >= 140ms) hoặc khi ở Fit-to-screen:
+      //   Giữ chuột trái và kéo ("Drag position" - kéo cửa sổ / bôi đen văn bản).
+      if (isMobile && isZoomedIn && heldMs < 140 && !isSpecialHoldDragActive) {
+        _touchModePanIsCanvasMove = true;
+        return;
+      }
+
+      _touchModePanIsCanvasMove = false;
+      final startPos =
+          lastTapDownDetails?.localPosition ?? _touchModeDownLocalPos;
+      await ffi.cursorModel.move(startPos.dx, startPos.dy);
+
       if (isDesktop || isWebDesktop) {
         ffi.cursorModel.trySetRemoteWindowCoords();
       }
 
-      // Workaround for the issue that the first pan event is sent a long time after the start event.
-      // If the time interval between the start event and the first pan event is less than 500ms,
-      // we consider to use the long press position as the start position.
-      //
-      // TODO: We should find a better way to send the first pan event as soon as possible.
-      if (DateTime.now().millisecondsSinceEpoch - _cacheLongPressPositionTs <
-          500) {
+      if (nowMs - _cacheLongPressPositionTs < 500) {
         await ffi.cursorModel
             .move(_cacheLongPressPosition.dx, _cacheLongPressPosition.dy);
       }
@@ -408,10 +549,22 @@ class _RawTouchGestureDetectorRegionState
     if (isNotTouchBasedDevice()) {
       return;
     }
-    if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
+    if (_oneFingerPanBlocked ||
+        ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
       return;
     }
+    if (isSpecialHoldDragActive) {
+      isSpecialHoldDragCanvasMoving = true;
+      onSpecialHoldSecondFingerStart?.call();
+    }
     if (handleTouch && !_touchModePanStarted) {
+      return;
+    }
+    if (handleTouch && _touchModePanIsCanvasMove) {
+      if (!canvasLocked) {
+        ffi.canvasModel.panX(d.delta.dx);
+        ffi.canvasModel.panY(d.delta.dy);
+      }
       return;
     }
     // In relative mouse mode, send delta directly without position tracking.
@@ -423,14 +576,19 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onOneFingerPanEnd(DragEndDetails d) async {
+    _shortPressDragHintTimer?.cancel();
+    final wasCanvasMove = _touchModePanIsCanvasMove;
+    _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
+    _touchModePanIsCanvasMove = false;
+    isSpecialHoldDragCanvasMoving = false;
     if (isNotTouchBasedDevice()) {
       return;
     }
     if (isDesktop || isWebDesktop) {
       ffi.cursorModel.clearRemoteWindowCoords();
     }
-    if (handleTouch) {
+    if (handleTouch && !wasCanvasMove) {
       // In relative mouse mode, skip mouse up - matches the skipped mouse down in onOneFingerPanStart
       if (!inputModel.relativeMouseMode.value) {
         await inputModel.sendMouse('up', MouseButtons.left);
@@ -443,16 +601,32 @@ class _RawTouchGestureDetectorRegionState
   // stuck in the "started" state and cause issues such as the Magic Mouse
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() {
+    _shortPressDragHintTimer?.cancel();
+    _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
+    _touchModePanIsCanvasMove = false;
+    isSpecialHoldDragCanvasMoving = false;
   }
+
+  String _twoFingerGestureMode = 'undecided'; // 'undecided' | 'scroll' | 'zoom'
+  Offset _twoFingerStartFocalPoint = Offset.zero;
 
   // scale + pan event
   onTwoFingerScaleStart(ScaleStartDetails d) {
+    _shortPressDragHintTimer?.cancel();
     _lastTapDownDetails = null;
     if (isNotTouchBasedDevice()) {
       return;
     }
+    _scale = 1.0;
+    _zoomLimitToastShownInGesture = false;
+    _twoFingerStartFocalPoint = d.focalPoint;
+    // DeskIn style: cả Touch mode và Cursor mode đều phân biệt mượt mà giữa
+    // Two-finger swipe (Window scrolling) và Pinch with two fingers (Zoom)!
+    _twoFingerGestureMode = ffi.ffiModel.isPeerAndroid ? 'zoom' : 'undecided';
     if (isSpecialHoldDragActive) {
+      isSpecialHoldDragCanvasMoving = true;
+      onSpecialHoldSecondFingerStart?.call();
       // Initialize the last focal point to calculate deltas manually.
       _lastSpecialHoldDragFocalPoint = d.focalPoint;
     }
@@ -463,12 +637,18 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
 
-    // If in special drag mode, perform a pan instead of a scale.
+    // If holding Left/Right floating button with 1 finger and dragging on screen with 2nd finger:
+    // Note: ScaleGestureRecognizer computes focalPoint as the average of both fingers ((p1 + p2) / 2).
+    // Because p1 (on the button) is stationary, focalPoint moves at half the delta of p2,
+    // OR we can use d.focalPointDelta * 2.0 (which never jumps even on the first frame!).
     if (isSpecialHoldDragActive) {
-      // Calculate delta manually to avoid the jumpy behavior.
-      final delta = d.focalPoint - _lastSpecialHoldDragFocalPoint;
-      _lastSpecialHoldDragFocalPoint = d.focalPoint;
-      await ffi.cursorModel.updatePan(delta * 2.0, d.focalPoint, handleTouch);
+      isSpecialHoldDragCanvasMoving = true;
+      final delta = d.focalPointDelta * 2.0;
+      if (inputModel.relativeMouseMode.value) {
+        await inputModel.sendMobileRelativeMouseMove(delta.dx, delta.dy);
+      } else {
+        await ffi.cursorModel.updatePan(delta, d.localFocalPoint, handleTouch);
+      }
       return;
     }
 
@@ -487,18 +667,73 @@ class _RawTouchGestureDetectorRegionState
                     .toJson()));
       }
     } else {
-      // mobile
-      ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
-      _scale = d.scale;
-      ffi.canvasModel.panX(d.focalPointDelta.dx);
-      ffi.canvasModel.panY(d.focalPointDelta.dy);
+      // Mobile: DeskIn-style mutually-exclusive two-finger gestures
+      if (_twoFingerGestureMode == 'undecided') {
+        final totalFocalMove = (d.focalPoint - _twoFingerStartFocalPoint).distance;
+        final scaleChange = (d.scale - 1.0).abs();
+        final isAtMinScale =
+            ffi.canvasModel.scale <= (ffi.imageModel.minScale + 0.005);
+
+        if (isAtMinScale && d.scale <= 0.88 && totalFocalMove < 24.0) {
+          _twoFingerGestureMode = 'min_zoom_blocked';
+          _showZoomToast('Không thể thu nhỏ thêm');
+          return;
+        }
+
+        // When already at Fit-to-Screen (minScale), pinching inward (d.scale < 1.0)
+        // cannot zoom out further, so only spreading outward (d.scale >= 1.10) enters zoom.
+        final wantsZoom = isAtMinScale ? (d.scale >= 1.10) : (scaleChange >= 0.12);
+
+        if (totalFocalMove > 7.0 && !wantsZoom) {
+          _twoFingerGestureMode = 'scroll';
+        } else if (wantsZoom) {
+          _twoFingerGestureMode = 'zoom';
+          _scale = d.scale;
+        }
+      }
+
+      if (_twoFingerGestureMode == 'scroll') {
+        // Strictly scroll ONLY — never zoom or pan canvas!
+        _mouseScrollIntegral += d.focalPointDelta.dy / 6.0;
+        while (_mouseScrollIntegral >= 1.0) {
+          inputModel.scroll(1);
+          _mouseScrollIntegral -= 1.0;
+        }
+        while (_mouseScrollIntegral <= -1.0) {
+          inputModel.scroll(-1);
+          _mouseScrollIntegral += 1.0;
+        }
+      } else if (_twoFingerGestureMode == 'zoom') {
+        final prevScale = ffi.canvasModel.scale;
+        final minScale = ffi.imageModel.minScale;
+        final maxScale = ffi.imageModel.maxScale;
+        final scaleFactor = d.scale / _scale;
+
+        if (scaleFactor < 1.0 &&
+            d.scale <= 0.88 &&
+            prevScale <= (minScale + 0.005)) {
+          _showZoomToast('Không thể thu nhỏ thêm');
+        } else if (scaleFactor > 1.0 &&
+            d.scale >= 1.12 &&
+            prevScale >= (maxScale - 0.005)) {
+          _showZoomToast('Không thể phóng to thêm');
+        }
+
+        // Strictly pinch to zoom + pan canvas ONLY — never scroll!
+        ffi.canvasModel.updateScale(scaleFactor, d.focalPoint);
+        _scale = d.scale;
+        ffi.canvasModel.panX(d.focalPointDelta.dx);
+        ffi.canvasModel.panY(d.focalPointDelta.dy);
+      }
     }
   }
 
   onTwoFingerScaleEnd(ScaleEndDetails d) async {
+    isSpecialHoldDragCanvasMoving = false;
     if (isNotTouchBasedDevice()) {
       return;
     }
+    _twoFingerGestureMode = 'undecided';
     if ((isDesktop || isWebDesktop)) {
       if (widget.isCamera) return;
       await bind.sessionSendPointer(
@@ -508,18 +743,49 @@ class _RawTouchGestureDetectorRegionState
     } else {
       // mobile
       _scale = 1;
-      // No idea why we need to set the view style to "" here.
-      // bind.sessionSetViewStyle(sessionId: sessionId, value: "");
     }
-    if (!isSpecialHoldDragActive) {
+    if (!isSpecialHoldDragActive &&
+        handleTouch &&
+        _touchModePanStarted &&
+        !_touchModePanIsCanvasMove) {
+      _touchModePanStarted = false;
       await inputModel.sendMouse('up', MouseButtons.left);
     }
   }
 
   get onHoldDragCancel => null;
+  get onThreeFingerVerticalDragStart => ffi.ffiModel.isPeerAndroid
+      ? null
+      : (DragStartDetails d) {
+          _threeFingerAccumDx = 0.0;
+          _threeFingerSwitchedScreen = false;
+        };
   get onThreeFingerVerticalDragUpdate => ffi.ffiModel.isPeerAndroid
       ? null
-      : (d) {
+      : (DragUpdateDetails d) {
+          // DeskIn style: Three-finger horizontal swipe = Switch screen
+          if (d.delta.dx.abs() > d.delta.dy.abs() * 1.2) {
+            _threeFingerAccumDx += d.delta.dx;
+            if (!_threeFingerSwitchedScreen &&
+                _threeFingerAccumDx.abs() >= 60.0) {
+              _threeFingerSwitchedScreen = true;
+              HapticFeedback.mediumImpact();
+              final pi = ffiModel.pi;
+              if (pi.displays.length > 1) {
+                final next = _threeFingerAccumDx < 0
+                    ? (pi.currentDisplay + 1) % pi.displays.length
+                    : (pi.currentDisplay + pi.displays.length - 1) %
+                        pi.displays.length;
+                openMonitorInTheSameTab(next, ffi, pi);
+                _showZoomToast(
+                    'Màn hình ${next + 1}/${pi.displays.length}',
+                    force: true);
+              } else {
+                _showZoomToast('Chỉ có 1 màn hình', force: true);
+              }
+            }
+            return;
+          }
           _mouseScrollIntegral += d.delta.dy / 4;
           if (_mouseScrollIntegral > 1) {
             inputModel.scroll(1);
@@ -585,6 +851,7 @@ class _RawTouchGestureDetectorRegionState
           ..onTwoFingerScaleStart = onTwoFingerScaleStart
           ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
           ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
+          ..onThreeFingerVerticalDragStart = onThreeFingerVerticalDragStart
           ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate;
       }),
     };
