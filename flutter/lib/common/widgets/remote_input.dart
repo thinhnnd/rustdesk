@@ -110,8 +110,9 @@ class _RawTouchGestureDetectorRegionState
   Offset _touchModeDownLocalPos = Offset.zero;
   Timer? _shortPressDragHintTimer;
   bool _longPressTriggeredRightClick = false;
-  int _mouseModeDownTimeMs = 0;
-  bool _mouseModePanIsLeftDrag = false;
+  bool _mouseModePanStarted = false;
+  bool _mouseModeMovedBeforeLongPress = false;
+  Offset _mouseModeInitialDownPos = Offset.zero;
   bool _mouseModeLongPressDragActive = false;
   Offset _lastMouseModeLongPressPos = Offset.zero;
   double _threeFingerAccumDx = 0.0;
@@ -164,9 +165,47 @@ class _RawTouchGestureDetectorRegionState
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        RawGestureDetector(
-          child: widget.child,
-          gestures: makeGestures(context),
+        Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (evt) {
+            if (!handleTouch) {
+              _mouseModeInitialDownPos = evt.localPosition;
+              _mouseModeMovedBeforeLongPress = false;
+              _mouseModePanStarted = false;
+            }
+          },
+          onPointerMove: (evt) {
+            if (!handleTouch && !_mouseModeLongPressDragActive) {
+              final dist =
+                  (evt.localPosition - _mouseModeInitialDownPos).distance;
+              if (dist > 7.0) {
+                _mouseModeMovedBeforeLongPress = true;
+                _shortPressDragHintTimer?.cancel();
+              }
+            }
+          },
+          onPointerUp: (_) {
+            _shortPressDragHintTimer?.cancel();
+            if (_mouseModeLongPressDragActive) {
+              _mouseModeLongPressDragActive = false;
+              if (!inputModel.relativeMouseMode.value) {
+                inputModel.sendMouse('up', MouseButtons.left);
+              }
+            }
+          },
+          onPointerCancel: (_) {
+            _shortPressDragHintTimer?.cancel();
+            if (_mouseModeLongPressDragActive) {
+              _mouseModeLongPressDragActive = false;
+              if (!inputModel.relativeMouseMode.value) {
+                inputModel.sendMouse('up', MouseButtons.left);
+              }
+            }
+          },
+          child: RawGestureDetector(
+            child: widget.child,
+            gestures: makeGestures(context),
+          ),
         ),
         if (isMobile)
           Positioned.fill(
@@ -244,17 +283,7 @@ class _RawTouchGestureDetectorRegionState
       }
     } else {
       _lastTapDownPositionForMouseMode = d.localPosition;
-      _mouseModeDownTimeMs = DateTime.now().millisecondsSinceEpoch;
-      _mouseModePanIsLeftDrag = false;
       _shortPressDragHintTimer?.cancel();
-      if (isMobile && !shouldBlockMouseModeEvent()) {
-        _shortPressDragHintTimer =
-            Timer(const Duration(milliseconds: 480), () {
-          if (mounted && !_mouseModeLongPressDragActive) {
-            HapticFeedback.selectionClick();
-          }
-        });
-      }
     }
   }
 
@@ -414,10 +443,12 @@ class _RawTouchGestureDetectorRegionState
         HapticFeedback.mediumImpact();
         await inputModel.tap(MouseButtons.right);
       } else {
-        if (shouldBlockMouseModeEvent()) {
+        if (_mouseModeMovedBeforeLongPress ||
+            _mouseModePanStarted ||
+            shouldBlockMouseModeEvent()) {
           return;
         }
-        // DeskIn Cursor Mode: Nhấn giữ và vuốt (Long press and drag) = Giữ chuột trái và di chuột (bôi đen văn bản / kéo cửa sổ)
+        // DeskIn Cursor Mode: Chỉ khi giữ yên ngón tay tại chỗ 560ms (không di chuột) rồi mới kéo -> bôi đen văn bản / kéo cửa sổ
         _mouseModeLongPressDragActive = true;
         HapticFeedback.mediumImpact();
         if (!inputModel.relativeMouseMode.value) {
@@ -440,7 +471,7 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
-    } else if (_mouseModeLongPressDragActive) {
+    } else {
       final delta = d.localPosition - _lastMouseModeLongPressPos;
       _lastMouseModeLongPressPos = d.localPosition;
       if (inputModel.relativeMouseMode.value) {
@@ -581,6 +612,8 @@ class _RawTouchGestureDetectorRegionState
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
     } else {
+      _mouseModePanStarted = true;
+      _mouseModeMovedBeforeLongPress = true;
       final offset = ffi.cursorModel.offset;
       final cursorX = offset.dx;
       final cursorY = offset.dy;
@@ -589,19 +622,6 @@ class _RawTouchGestureDetectorRegionState
       final size = MediaQueryData.fromView(View.of(context)).size;
       if (!visible.contains(Offset(cursorX, cursorY))) {
         await ffi.cursorModel.move(size.width / 2, size.height / 2);
-      }
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      final heldMs = nowMs - _mouseModeDownTimeMs;
-      if (isMobile &&
-          heldMs >= 480 &&
-          heldMs < 2000 &&
-          !isSpecialHoldDragActive &&
-          !inputModel.relativeMouseMode.value) {
-        _mouseModePanIsLeftDrag = true;
-        HapticFeedback.mediumImpact();
-        await inputModel.sendMouse('down', MouseButtons.left);
-      } else {
-        _mouseModePanIsLeftDrag = false;
       }
     }
   }
@@ -639,11 +659,10 @@ class _RawTouchGestureDetectorRegionState
   onOneFingerPanEnd(DragEndDetails d) async {
     _shortPressDragHintTimer?.cancel();
     final wasCanvasMove = _touchModePanIsCanvasMove;
-    final wasMouseModeLeftDrag = _mouseModePanIsLeftDrag;
     _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
     _touchModePanIsCanvasMove = false;
-    _mouseModePanIsLeftDrag = false;
+    _mouseModePanStarted = false;
     isSpecialHoldDragCanvasMoving = false;
     if (isNotTouchBasedDevice()) {
       return;
@@ -656,10 +675,6 @@ class _RawTouchGestureDetectorRegionState
       if (!inputModel.relativeMouseMode.value) {
         await inputModel.sendMouse('up', MouseButtons.left);
       }
-    } else if (!handleTouch && wasMouseModeLeftDrag) {
-      if (!inputModel.relativeMouseMode.value) {
-        await inputModel.sendMouse('up', MouseButtons.left);
-      }
     }
   }
 
@@ -669,16 +684,10 @@ class _RawTouchGestureDetectorRegionState
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() {
     _shortPressDragHintTimer?.cancel();
-    if (!handleTouch && _mouseModePanIsLeftDrag) {
-      _mouseModePanIsLeftDrag = false;
-      if (!inputModel.relativeMouseMode.value) {
-        inputModel.sendMouse('up', MouseButtons.left);
-      }
-    }
     _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
     _touchModePanIsCanvasMove = false;
-    _mouseModePanIsLeftDrag = false;
+    _mouseModePanStarted = false;
     isSpecialHoldDragCanvasMoving = false;
   }
 
@@ -891,7 +900,7 @@ class _RawTouchGestureDetectorRegionState
       LongPressGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
               () => LongPressGestureRecognizer(
-                  duration: const Duration(milliseconds: 480)), (instance) {
+                  duration: const Duration(milliseconds: 500)), (instance) {
         instance
           ..onLongPressDown = onLongPressDown
           ..onLongPressUp = onLongPressUp
@@ -900,14 +909,6 @@ class _RawTouchGestureDetectorRegionState
           ..onLongPressMoveUpdate = onLongPressMoveUpdate;
       }),
       // Customized
-      HoldTapMoveGestureRecognizer:
-          GestureRecognizerFactoryWithHandlers<HoldTapMoveGestureRecognizer>(
-              () => HoldTapMoveGestureRecognizer(),
-              (instance) => instance
-                ..onHoldDragStart = onHoldDragStart
-                ..onHoldDragUpdate = onHoldDragUpdate
-                ..onHoldDragCancel = onHoldDragCancel
-                ..onHoldDragEnd = onHoldDragEnd),
       DoubleFinerTapGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<DoubleFinerTapGestureRecognizer>(
               () => DoubleFinerTapGestureRecognizer(), (instance) {
@@ -918,6 +919,8 @@ class _RawTouchGestureDetectorRegionState
       CustomTouchGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
               () => CustomTouchGestureRecognizer(), (instance) {
+        instance.gestureSettings =
+            const DeviceGestureSettings(touchSlop: 8.0);
         instance.onOneFingerPanStart =
             (DragStartDetails d) => onOneFingerPanStart(context, d);
         instance

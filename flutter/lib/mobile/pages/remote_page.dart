@@ -97,8 +97,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   bool _showOperationGuideOverlay = false;
   bool _operationGuideIsTouchPage = true;
   bool _alwaysShowShortcuts = false;
-  double _floatingBarRight = 18.0;
-  double _floatingBarBottom = 26.0;
+  double _floatingBarRight = 14.0;
+  double _floatingBarBottom = 16.0;
   bool _isDraggingBar = false;
   Offset _lastBarDragGlobalPos = Offset.zero;
   Timer? _capsuleHoldTimer;

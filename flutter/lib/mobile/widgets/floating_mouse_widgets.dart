@@ -12,19 +12,19 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
 // Used for the wheel button and wheel scroll widgets
-const double _kSpaceToHorizontalEdge = 16;
-const double _wheelWidth = 44;
-const double _wheelHeight = 148;
-// Used for the DeskIn-style left/right button bar
-const double _kSpaceToVerticalEdge = 20;
-const double _kSpaceBetweenLeftRightButtons = 12;
-const double _kLeftRightButtonWidth = 76;
-const double _kLeftRightButtonHeight = 46;
-const double _kBorderWidth = 1.2;
-final Color _kDefaultBorderColor = Colors.white.withOpacity(0.55);
-final Color _kDefaultColor = const Color(0xFF1E222D).withOpacity(0.72);
-final Color _kTapDownColor = const Color(0xFF2B6CB0).withOpacity(0.88);
-final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.92);
+const double _kSpaceToHorizontalEdge = 12;
+const double _wheelWidth = 42;
+const double _wheelHeight = 140;
+// Used for the DeskIn-style left/right button bar (bottom-left split capsule)
+const double _kSpaceToVerticalEdge = 24;
+const double _kSpaceBetweenLeftRightButtons = 2;
+const double _kLeftRightButtonWidth = 66;
+const double _kLeftRightButtonHeight = 50;
+const double _kBorderWidth = 1.0;
+final Color _kDefaultBorderColor = Colors.white.withOpacity(0.34);
+final Color _kDefaultColor = const Color(0xFF141820).withOpacity(0.60);
+final Color _kTapDownColor = const Color(0xFF2B6CB0).withOpacity(0.86);
+final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.85);
 const int _kInputTimerIntervalMillis = 85;
 
 class FloatingMouseWidgets extends StatefulWidget {
@@ -196,7 +196,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
       onPointerCancel: onPointerCancel,
       child: Container(
         width: _wheelWidth,
-        height: 48,
+        height: 46,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: flagGetter() ? _kTapDownColor : _kDefaultColor,
@@ -205,7 +205,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
               width: _kBorderWidth),
           borderRadius: borderRadius,
         ),
-        child: Icon(iconData, color: _kWidgetHighlightColor, size: 26),
+        child: Icon(iconData, color: _kWidgetHighlightColor, size: 22),
       ),
     );
   }
@@ -250,7 +250,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             () => _isUpDown,
             BorderRadius.vertical(top: Radius.circular(_wheelWidth * 0.5)),
-            Icons.keyboard_arrow_up_rounded,
+            Icons.arrow_drop_up_rounded,
           ),
           // Middle wheel: tap to middle-click, vertical drag to smooth scroll!
           Listener(
@@ -287,7 +287,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             child: Container(
               width: _wheelWidth,
-              height: 52,
+              height: 48,
               decoration: BoxDecoration(
                 color: _isMidDown ? _kTapDownColor : _kDefaultColor,
                 border: Border.symmetric(
@@ -302,8 +302,8 @@ class _FloatingWheelState extends State<FloatingWheel> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Container(
-                      width: 14,
-                      height: 2,
+                      width: 18,
+                      height: 1.8,
                       decoration: BoxDecoration(
                         color: _kDefaultBorderColor,
                         borderRadius: BorderRadius.circular(1),
@@ -311,17 +311,17 @@ class _FloatingWheelState extends State<FloatingWheel> {
                     ),
                     const SizedBox(height: 5),
                     Container(
-                      width: 20,
-                      height: 2.5,
+                      width: 12,
+                      height: 1.8,
                       decoration: BoxDecoration(
-                        color: _kWidgetHighlightColor,
-                        borderRadius: BorderRadius.circular(1.5),
+                        color: _kDefaultBorderColor,
+                        borderRadius: BorderRadius.circular(1),
                       ),
                     ),
                     const SizedBox(height: 5),
                     Container(
-                      width: 14,
-                      height: 2,
+                      width: 18,
+                      height: 1.8,
                       decoration: BoxDecoration(
                         color: _kDefaultBorderColor,
                         borderRadius: BorderRadius.circular(1),
@@ -354,7 +354,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             () => _isDownDown,
             BorderRadius.vertical(bottom: Radius.circular(_wheelWidth * 0.5)),
-            Icons.keyboard_arrow_down_rounded,
+            Icons.arrow_drop_down_rounded,
           ),
         ],
       ),
@@ -481,17 +481,16 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
 
   double _getOffsetX(double w) {
     if (_isLeft) {
-      return (w - _kLeftRightButtonWidth * 2 - _kSpaceBetweenLeftRightButtons) *
-          0.5;
+      return 14.0;
     } else {
-      return (w + _kSpaceBetweenLeftRightButtons) * 0.5;
+      return 14.0 + _kLeftRightButtonWidth + _kSpaceBetweenLeftRightButtons;
     }
   }
 
   String _getPositionKey(Orientation ori) {
     final strLeftRight = _isLeft ? 'l' : 'r';
     final strOri = ori == Orientation.landscape ? 'l' : 'p';
-    return '$strLeftRight$strOri-mouse-btn-pos';
+    return '$strLeftRight$strOri-deskin-mouse-btn-pos-v2';
   }
 
   static Offset? _loadPositionFromString(String s) {
@@ -525,7 +524,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     final size = MediaQuery.of(context).size;
     if (pos == null) {
       _position = Offset(_getOffsetX(size.width),
-          size.height - _kSpaceToVerticalEdge - _kLeftRightButtonHeight - 40);
+          size.height - _kSpaceToVerticalEdge - _kLeftRightButtonHeight);
     } else {
       _position = Offset(
         pos.dx
@@ -732,46 +731,76 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
               ),
               borderRadius: _isLeft
                   ? const BorderRadius.horizontal(
-                      left: Radius.circular(23),
-                      right: Radius.circular(8),
+                      left: Radius.circular(25),
+                      right: Radius.circular(4),
                     )
                   : const BorderRadius.horizontal(
-                      left: Radius.circular(8),
-                      right: Radius.circular(23),
+                      left: Radius.circular(4),
+                      right: Radius.circular(25),
                     ),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(_isDragging ? 0.45 : 0.28),
+                  color: Colors.black.withOpacity(_isDragging ? 0.45 : 0.24),
                   blurRadius: _isDragging ? 12 : 6,
                   offset: const Offset(0, 2),
                 ),
               ],
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.mouse_outlined,
-                  size: 16,
-                  color: isDown ? Colors.white : Colors.white70,
-                ),
-                const SizedBox(width: 5),
-                Text(
-                  _isLeft ? 'L' : 'R',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-              ],
+            child: CustomPaint(
+              size: const Size(22, 30),
+              painter: _DeskInMouseButtonPainter(isLeft: _isLeft),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+class _DeskInMouseButtonPainter extends CustomPainter {
+  final bool isLeft;
+  const _DeskInMouseButtonPainter({required this.isLeft});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final bodyPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    // Draw the solid white rounded mouse silhouette
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0, 0, w, h),
+      Radius.circular(w * 0.48),
+    );
+    canvas.drawRRect(rrect, bodyPaint);
+
+    // Cut out / shade the active button (top-left for Left click, top-right for Right click)
+    final cutoutPaint = Paint()
+      ..color = const Color(0xFF1F242D)
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    final btnTop = h * 0.11;
+    final btnHeight = h * 0.34;
+    final btnWidth = w * 0.34;
+    final btnLeft = isLeft ? (w * 0.14) : (w - w * 0.14 - btnWidth);
+
+    final btnRRect = RRect.fromRectAndCorners(
+      Rect.fromLTWH(btnLeft, btnTop, btnWidth, btnHeight),
+      topLeft: Radius.circular(isLeft ? w * 0.34 : 2.5),
+      topRight: Radius.circular(isLeft ? 2.5 : w * 0.34),
+      bottomLeft: const Radius.circular(2.5),
+      bottomRight: const Radius.circular(2.5),
+    );
+    canvas.drawRRect(btnRRect, cutoutPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _DeskInMouseButtonPainter oldDelegate) =>
+      oldDelegate.isLeft != isLeft;
 }
 
 // Virtual joystick can send either absolute movement (via updatePan)

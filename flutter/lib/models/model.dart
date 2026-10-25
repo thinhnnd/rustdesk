@@ -2098,10 +2098,9 @@ class ImageModel with ChangeNotifier {
   double get minScale {
     if (_image == null) return 1.0;
     final mediaData = MediaQueryData.fromView(ui.window);
-    final w = mediaData.size.width -
-        mediaData.padding.left -
-        mediaData.padding.right;
     final isPortrait = mediaData.size.height > mediaData.size.width;
+    final w = mediaData.size.width -
+        (isPortrait ? (mediaData.padding.left + mediaData.padding.right) : 0.0);
     final h =
         mediaData.size.height - (isPortrait ? mediaData.padding.top : 0.0);
     if (w <= 0 || h <= 0) return 1.0;
@@ -2238,7 +2237,7 @@ class ViewStyle {
 
   double get scale {
     double s = 1.0;
-    if (style == kRemoteViewStyleAdaptive) {
+    if (style == kRemoteViewStyleAdaptive || (isMobile && style.isEmpty)) {
       if (width != 0 &&
           height != 0 &&
           displayWidth != 0 &&
@@ -2415,8 +2414,6 @@ class CanvasModel with ChangeNotifier {
     double w = size.width - leftToEdge - rightToEdge;
     double h = size.height - topToEdge - bottomToEdge;
     if (isMobile) {
-      // Account for horizontal safe area insets on both orientations.
-      w = w - mediaData.padding.left - mediaData.padding.right;
       // Vertically, subtract the bottom keyboard inset (viewInsets.bottom) and any
       // bottom overlay height (e.g. key-help tools at bottom) so the canvas is not covered.
       h = h -
@@ -2424,21 +2421,12 @@ class CanvasModel with ChangeNotifier {
           (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.height ??
               0);
       // Orientation-specific handling:
-      //  - Portrait: additionally subtract top padding (e.g. status bar / notch)
-      //  - Landscape: does not subtract mediaData.padding.top/bottom (home indicator auto-hides)
+      //  - Portrait: subtract horizontal safe area & top padding (status bar / notch)
+      //  - Landscape: use full screen width & height so the remote desktop canvas
+      //    is centered symmetrically across the entire screen (DeskIn style).
       final isPortrait = size.height > size.width;
       if (isPortrait) {
-        // In portrait mode, subtract the top safe-area padding (e.g. status bar / notch)
-        // so the remote image is not truncated, while keeping the bottom inset to avoid
-        // introducing unnecessary blank space around the canvas.
-        //
-        // iOS -> Android, portrait, adjust mode:
-        // h = h (no padding subtracted): top and bottom are truncated
-        //   https://github.com/user-attachments/assets/30ed4559-c27e-432b-847f-8fec23c9f998
-        // h = h - top - bottom: extra blank spaces appear
-        //   https://github.com/user-attachments/assets/12a98817-3b4e-43aa-be0f-4b03cf364b7e
-        // h = h - top (current): works fine
-        //   https://github.com/user-attachments/assets/95f047f2-7f47-4a36-8113-5023989a0c81
+        w = w - mediaData.padding.left - mediaData.padding.right;
         h = h - mediaData.padding.top;
       }
     }
@@ -2524,6 +2512,7 @@ class CanvasModel with ChangeNotifier {
     _y = (size.height - displayHeight * _scale) / 2;
     if (isMobile) {
       _moveToCenterCursor();
+      _clampAndCenterCanvasOffset();
     }
   }
 

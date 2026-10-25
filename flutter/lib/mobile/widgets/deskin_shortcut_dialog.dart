@@ -582,12 +582,15 @@ class _DeskInShortcutDialogState extends State<DeskInShortcutDialog> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
-    final dialogWidth = (media.size.width * 0.72).clamp(340.0, 570.0);
-    final dialogHeight = (media.size.height * 0.76).clamp(320.0, 470.0);
+    final dialogWidth = (media.size.width * 0.72).clamp(320.0, 570.0);
+    final availableHeight =
+        (media.size.height - media.viewInsets.bottom - 20.0).clamp(180.0, 470.0);
+    final dialogHeight =
+        (media.size.height * 0.84).clamp(180.0, availableHeight);
 
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       child: Container(
         width: dialogWidth,
         height: dialogHeight,
