@@ -100,6 +100,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   double _floatingBarBottom = 26.0;
   bool _isDraggingBar = false;
   Offset _lastBarDragGlobalPos = Offset.zero;
+  Timer? _capsuleHoldTimer;
+  int? _capsuleActivePointer;
+  Offset _capsuleDownGlobalPos = Offset.zero;
+  bool _capsuleDownIsLeftHalf = false;
+  bool _capsuleIsPressing = false;
   String _value = '';
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
@@ -224,6 +229,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     inputModel.keyboardInputAllowed = true;
     await gFFI.close();
     _timer?.cancel();
+    _capsuleHoldTimer?.cancel();
     _iosKeyboardWorkaroundTimer?.cancel();
     gFFI.dialogManager.dismissAll();
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
@@ -241,6 +247,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+    } else if (state == AppLifecycleState.paused) {
+      // Nếu bật "Auto Lock Screen", tự động khóa màn hình máy từ xa khi tắt màn hình iPad / ẩn app
+      if (!gFFI.ffiModel.viewOnly &&
+          gFFI.ffiModel.keyboard &&
+          !gFFI.ffiModel.isPeerAndroid &&
+          bind.sessionGetToggleOptionSync(
+              sessionId: sessionId, arg: 'lock-after-session-end')) {
+        bind.sessionLockScreen(sessionId: sessionId);
+      }
     }
   }
 
@@ -561,19 +576,45 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     return Positioned(
       right: effectiveRight,
       bottom: effectiveBottom,
-      child: GestureDetector(
-        onLongPressStart: (details) {
-          HapticFeedback.mediumImpact();
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          if (_capsuleActivePointer != null) return;
+          _capsuleActivePointer = event.pointer;
+          _capsuleDownGlobalPos = event.position;
+          _lastBarDragGlobalPos = event.position;
+          // Nửa trái (~44px đầu) là nút mở bàn phím, nửa phải là nút mở thanh công cụ
+          _capsuleDownIsLeftHalf = event.localPosition.dx < 44.0;
           setState(() {
-            _isDraggingBar = true;
-            _lastBarDragGlobalPos = details.globalPosition;
+            _capsuleIsPressing = true;
             _floatingBarRight = effectiveRight;
             _floatingBarBottom = effectiveBottom;
           });
+          _capsuleHoldTimer?.cancel();
+          _capsuleHoldTimer = Timer(const Duration(milliseconds: 240), () {
+            if (!mounted || _capsuleActivePointer != event.pointer) return;
+            HapticFeedback.mediumImpact();
+            setState(() {
+              _isDraggingBar = true;
+            });
+          });
         },
-        onLongPressMoveUpdate: (details) {
-          final delta = details.globalPosition - _lastBarDragGlobalPos;
-          _lastBarDragGlobalPos = details.globalPosition;
+        onPointerMove: (event) {
+          if (event.pointer != _capsuleActivePointer) return;
+          if (!_isDraggingBar) {
+            final movedDist = (event.position - _capsuleDownGlobalPos).distance;
+            if (movedDist > 8.0) {
+              _capsuleHoldTimer?.cancel();
+              HapticFeedback.mediumImpact();
+              setState(() {
+                _isDraggingBar = true;
+              });
+            } else {
+              return;
+            }
+          }
+          final delta = event.position - _lastBarDragGlobalPos;
+          _lastBarDragGlobalPos = event.position;
           setState(() {
             _floatingBarRight =
                 (_floatingBarRight - delta.dx).clamp(12.0, maxRight).toDouble();
@@ -582,18 +623,40 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 .toDouble();
           });
         },
-        onLongPressEnd: (_) {
-          HapticFeedback.selectionClick();
+        onPointerUp: (event) {
+          if (event.pointer != _capsuleActivePointer) return;
+          _capsuleHoldTimer?.cancel();
+          final wasDragging = _isDraggingBar;
+          final tapLeft = _capsuleDownIsLeftHalf;
+          _capsuleActivePointer = null;
           setState(() {
             _isDraggingBar = false;
+            _capsuleIsPressing = false;
+          });
+          HapticFeedback.selectionClick();
+          if (!wasDragging) {
+            if (tapLeft) {
+              openKeyboard();
+            } else {
+              setState(() => _showBar = true);
+            }
+          }
+        },
+        onPointerCancel: (event) {
+          if (event.pointer != _capsuleActivePointer) return;
+          _capsuleHoldTimer?.cancel();
+          _capsuleActivePointer = null;
+          setState(() {
+            _isDraggingBar = false;
+            _capsuleIsPressing = false;
           });
         },
         child: AnimatedScale(
-          scale: _isDraggingBar ? 1.08 : 1.0,
-          duration: const Duration(milliseconds: 140),
+          scale: _isDraggingBar ? 1.10 : (_capsuleIsPressing ? 0.96 : 1.0),
+          duration: const Duration(milliseconds: 130),
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.96),
+              color: Colors.white.withOpacity(0.95),
               borderRadius: BorderRadius.circular(22),
               border: Border.all(
                 color: _isDraggingBar
@@ -612,54 +675,55 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Nửa trái: Mở bàn phím (Nổi bật với nền xanh DeskIn Blue)
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {
-                    HapticFeedback.selectionClick();
-                    openKeyboard();
-                  },
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF2F80ED),
-                      borderRadius: BorderRadius.horizontal(
-                        left: Radius.circular(20),
-                      ),
-                    ),
-                    child: const Icon(
-                      Icons.keyboard_alt_outlined,
-                      color: Colors.white,
-                      size: 18,
+                // Nửa trái: Mở bàn phím (Nền trắng đồng nhất, chỉ nháy nhẹ khi đang bấm)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: (_capsuleIsPressing &&
+                            !_isDraggingBar &&
+                            _capsuleDownIsLeftHalf)
+                        ? const Color(0xFFE2E8F0)
+                        : Colors.transparent,
+                    borderRadius: const BorderRadius.horizontal(
+                      left: Radius.circular(20),
                     ),
                   ),
+                  child: const Icon(
+                    Icons.keyboard_alt_outlined,
+                    color: Color(0xFF1E293B),
+                    size: 18,
+                  ),
                 ),
-                // Nửa phải: Mở thanh công cụ ở giữa (Nền trắng sáng nổi bật trên mọi nền tối/sáng)
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {
-                    HapticFeedback.selectionClick();
-                    setState(() => _showBar = true);
-                  },
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: const BoxDecoration(
-                      borderRadius: BorderRadius.horizontal(
-                        right: Radius.circular(20),
-                      ),
+                // Vách ngăn mảnh ở giữa viên thuốc
+                Container(
+                  width: 1,
+                  height: 18,
+                  color: const Color(0xFFCBD5E1),
+                ),
+                // Nửa phải: Mở thanh công cụ ở giữa
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: (_capsuleIsPressing &&
+                            !_isDraggingBar &&
+                            !_capsuleDownIsLeftHalf)
+                        ? const Color(0xFFE2E8F0)
+                        : Colors.transparent,
+                    borderRadius: const BorderRadius.horizontal(
+                      right: Radius.circular(20),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: const [
-                        Icon(Icons.apps_rounded,
-                            color: Color(0xFF1E293B), size: 17),
-                        SizedBox(width: 2),
-                        Icon(Icons.expand_more_rounded,
-                            color: Color(0xFF475569), size: 16),
-                      ],
-                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Icon(Icons.apps_rounded,
+                          color: Color(0xFF1E293B), size: 17),
+                      SizedBox(width: 2),
+                      Icon(Icons.expand_more_rounded,
+                          color: Color(0xFF475569), size: 16),
+                    ],
                   ),
                 ),
               ],
@@ -767,8 +831,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                           : Icons.mouse_rounded,
                       label: ffiModel.touchMode ? 'Touch' : 'Mouse',
                       active: _showMousePanel,
-                      bgColor: const Color(0xFFEFF6FF),
-                      iconColor: activeBlue,
                       onTap: () {
                         setState(() {
                           _showMousePanel = !_showMousePanel;
@@ -1253,6 +1315,27 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               setState(() => _alwaysShowShortcuts = v);
             },
           ),
+          if (!ffiModel.viewOnly &&
+              ffiModel.keyboard &&
+              !ffiModel.isPeerAndroid) ...[
+            const Divider(
+                height: 1,
+                thickness: 1,
+                indent: 18,
+                endIndent: 18,
+                color: dividerThin),
+            buildSwitchRow(
+              title: 'Auto Lock Screen',
+              leadingIcon: Icons.lock_outline_rounded,
+              value: bind.sessionGetToggleOptionSync(
+                  sessionId: sessionId, arg: 'lock-after-session-end'),
+              onChanged: (_) async {
+                await bind.sessionToggleOption(
+                    sessionId: sessionId, value: 'lock-after-session-end');
+                setState(() {});
+              },
+            ),
+          ],
         ],
       );
     }

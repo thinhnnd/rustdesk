@@ -110,6 +110,10 @@ class _RawTouchGestureDetectorRegionState
   Offset _touchModeDownLocalPos = Offset.zero;
   Timer? _shortPressDragHintTimer;
   bool _longPressTriggeredRightClick = false;
+  int _mouseModeDownTimeMs = 0;
+  bool _mouseModePanIsLeftDrag = false;
+  bool _mouseModeLongPressDragActive = false;
+  Offset _lastMouseModeLongPressPos = Offset.zero;
   double _threeFingerAccumDx = 0.0;
   bool _threeFingerSwitchedScreen = false;
   Offset _doubleFinerTapPosition = Offset.zero;
@@ -240,6 +244,17 @@ class _RawTouchGestureDetectorRegionState
       }
     } else {
       _lastTapDownPositionForMouseMode = d.localPosition;
+      _mouseModeDownTimeMs = DateTime.now().millisecondsSinceEpoch;
+      _mouseModePanIsLeftDrag = false;
+      _shortPressDragHintTimer?.cancel();
+      if (isMobile && !shouldBlockMouseModeEvent()) {
+        _shortPressDragHintTimer =
+            Timer(const Duration(milliseconds: 480), () {
+          if (mounted && !_mouseModeLongPressDragActive) {
+            HapticFeedback.selectionClick();
+          }
+        });
+      }
     }
   }
 
@@ -343,6 +358,8 @@ class _RawTouchGestureDetectorRegionState
       }
     } else {
       _lastTapDownPositionForMouseMode = d.localPosition;
+      _lastMouseModeLongPressPos = d.localPosition;
+      _mouseModeLongPressDragActive = false;
     }
   }
 
@@ -358,6 +375,23 @@ class _RawTouchGestureDetectorRegionState
       }
       if (ffiModel.isPeerMobile) {
         await inputModel.tapUp(MouseButtons.left);
+      }
+    } else {
+      if (_mouseModeLongPressDragActive) {
+        _mouseModeLongPressDragActive = false;
+        if (!inputModel.relativeMouseMode.value) {
+          await inputModel.sendMouse('up', MouseButtons.left);
+        }
+      }
+    }
+  }
+
+  onLongPressCancel() async {
+    _shortPressDragHintTimer?.cancel();
+    if (_mouseModeLongPressDragActive) {
+      _mouseModeLongPressDragActive = false;
+      if (!inputModel.relativeMouseMode.value) {
+        await inputModel.sendMouse('up', MouseButtons.left);
       }
     }
   }
@@ -378,12 +412,18 @@ class _RawTouchGestureDetectorRegionState
         }
         _longPressTriggeredRightClick = true;
         HapticFeedback.mediumImpact();
+        await inputModel.tap(MouseButtons.right);
       } else {
         if (shouldBlockMouseModeEvent()) {
           return;
         }
+        // DeskIn Cursor Mode: Nhấn giữ và vuốt (Long press and drag) = Giữ chuột trái và di chuột (bôi đen văn bản / kéo cửa sổ)
+        _mouseModeLongPressDragActive = true;
+        HapticFeedback.mediumImpact();
+        if (!inputModel.relativeMouseMode.value) {
+          await inputModel.sendMouse('down', MouseButtons.left);
+        }
       }
-      await inputModel.tap(MouseButtons.right);
     } else {
       // It's better to send a message to tell the controlled device that the long press event is triggered.
       // We're now using a `TimerTask` in `InputService.kt` to decide whether to trigger the long press event.
@@ -400,6 +440,14 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
+    } else if (_mouseModeLongPressDragActive) {
+      final delta = d.localPosition - _lastMouseModeLongPressPos;
+      _lastMouseModeLongPressPos = d.localPosition;
+      if (inputModel.relativeMouseMode.value) {
+        await inputModel.sendMobileRelativeMouseMove(delta.dx, delta.dy);
+      } else {
+        await ffi.cursorModel.updatePan(delta, d.localPosition, handleTouch);
+      }
     }
   }
 
@@ -542,6 +590,19 @@ class _RawTouchGestureDetectorRegionState
       if (!visible.contains(Offset(cursorX, cursorY))) {
         await ffi.cursorModel.move(size.width / 2, size.height / 2);
       }
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final heldMs = nowMs - _mouseModeDownTimeMs;
+      if (isMobile &&
+          heldMs >= 480 &&
+          heldMs < 2000 &&
+          !isSpecialHoldDragActive &&
+          !inputModel.relativeMouseMode.value) {
+        _mouseModePanIsLeftDrag = true;
+        HapticFeedback.mediumImpact();
+        await inputModel.sendMouse('down', MouseButtons.left);
+      } else {
+        _mouseModePanIsLeftDrag = false;
+      }
     }
   }
 
@@ -578,9 +639,11 @@ class _RawTouchGestureDetectorRegionState
   onOneFingerPanEnd(DragEndDetails d) async {
     _shortPressDragHintTimer?.cancel();
     final wasCanvasMove = _touchModePanIsCanvasMove;
+    final wasMouseModeLeftDrag = _mouseModePanIsLeftDrag;
     _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
     _touchModePanIsCanvasMove = false;
+    _mouseModePanIsLeftDrag = false;
     isSpecialHoldDragCanvasMoving = false;
     if (isNotTouchBasedDevice()) {
       return;
@@ -593,6 +656,10 @@ class _RawTouchGestureDetectorRegionState
       if (!inputModel.relativeMouseMode.value) {
         await inputModel.sendMouse('up', MouseButtons.left);
       }
+    } else if (!handleTouch && wasMouseModeLeftDrag) {
+      if (!inputModel.relativeMouseMode.value) {
+        await inputModel.sendMouse('up', MouseButtons.left);
+      }
     }
   }
 
@@ -602,9 +669,16 @@ class _RawTouchGestureDetectorRegionState
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() {
     _shortPressDragHintTimer?.cancel();
+    if (!handleTouch && _mouseModePanIsLeftDrag) {
+      _mouseModePanIsLeftDrag = false;
+      if (!inputModel.relativeMouseMode.value) {
+        inputModel.sendMouse('up', MouseButtons.left);
+      }
+    }
     _oneFingerPanBlocked = false;
     _touchModePanStarted = false;
     _touchModePanIsCanvasMove = false;
+    _mouseModePanIsLeftDrag = false;
     isSpecialHoldDragCanvasMoving = false;
   }
 
@@ -816,10 +890,12 @@ class _RawTouchGestureDetectorRegionState
       }),
       LongPressGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
-              () => LongPressGestureRecognizer(), (instance) {
+              () => LongPressGestureRecognizer(
+                  duration: const Duration(milliseconds: 480)), (instance) {
         instance
           ..onLongPressDown = onLongPressDown
           ..onLongPressUp = onLongPressUp
+          ..onLongPressCancel = onLongPressCancel
           ..onLongPress = onLongPress
           ..onLongPressMoveUpdate = onLongPressMoveUpdate;
       }),
