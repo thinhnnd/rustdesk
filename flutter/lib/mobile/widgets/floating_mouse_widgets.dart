@@ -25,7 +25,8 @@ final Color _kDefaultBorderColor = Colors.white.withOpacity(0.34);
 final Color _kDefaultColor = const Color(0xFF141820).withOpacity(0.60);
 final Color _kTapDownColor = const Color(0xFF2B6CB0).withOpacity(0.86);
 final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.85);
-const int _kInputTimerIntervalMillis = 85;
+const int _kInputTimerInitialDelayMillis = 260;
+const int _kInputTimerIntervalMillis = 155;
 
 class FloatingMouseWidgets extends StatefulWidget {
   final FFI ffi;
@@ -262,13 +263,13 @@ class _FloatingWheelState extends State<FloatingWheel> {
             },
             onPointerMove: (event) {
               _swipeScrollAccum += event.delta.dy;
-              while (_swipeScrollAccum <= -8.0) {
+              while (_swipeScrollAccum <= -16.0) {
                 _inputModel.scroll(1);
-                _swipeScrollAccum += 8.0;
+                _swipeScrollAccum += 16.0;
               }
-              while (_swipeScrollAccum >= 8.0) {
+              while (_swipeScrollAccum >= 16.0) {
                 _inputModel.scroll(-1);
-                _swipeScrollAccum -= 8.0;
+                _swipeScrollAccum -= 16.0;
               }
             },
             onPointerUp: (event) {
@@ -364,10 +365,23 @@ class _FloatingWheelState extends State<FloatingWheel> {
   void _startScrollTimer(int direction) {
     _scrollTimer?.cancel();
     _inputModel.scroll(direction);
-    _scrollTimer = Timer.periodic(
-        Duration(milliseconds: _kInputTimerIntervalMillis), (timer) {
-      _inputModel.scroll(direction);
-    });
+    _scrollTimer = Timer(
+      const Duration(milliseconds: _kInputTimerInitialDelayMillis),
+      () {
+        if (!mounted || (!_isUpDown && !_isDownDown)) return;
+        _inputModel.scroll(direction);
+        _scrollTimer = Timer.periodic(
+          const Duration(milliseconds: _kInputTimerIntervalMillis),
+          (timer) {
+            if (!mounted || (!_isUpDown && !_isDownDown)) {
+              timer.cancel();
+              return;
+            }
+            _inputModel.scroll(direction);
+          },
+        );
+      },
+    );
   }
 
   void _stopScrollTimer() {

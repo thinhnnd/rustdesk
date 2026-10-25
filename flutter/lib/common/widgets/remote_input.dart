@@ -777,7 +777,7 @@ class _RawTouchGestureDetectorRegionState
 
       if (_twoFingerGestureMode == 'scroll') {
         // Strictly scroll ONLY — never zoom or pan canvas!
-        _mouseScrollIntegral += d.focalPointDelta.dy / 6.0;
+        _mouseScrollIntegral += d.focalPointDelta.dy / 14.0;
         while (_mouseScrollIntegral >= 1.0) {
           inputModel.scroll(1);
           _mouseScrollIntegral -= 1.0;
