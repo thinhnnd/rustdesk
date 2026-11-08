@@ -7,6 +7,16 @@ typedef struct _Dart_Handle* Dart_Handle;
 
 #define AUDIO_BUFFER_MS 3000
 
+#define TOKEN_BYTES 32
+
+#define MAX_RECORDS 128
+
+#define DEFAULT_DAYS 90
+
+#define NEVER_EXPIRE 0
+
+#define DAY_MILLIS (((24 * 60) * 60) * 1000)
+
 #define CLIPBOARD_INTERVAL 333
 
 /**
@@ -124,7 +134,8 @@ WireSyncReturn wire_session_add_sync(struct wire_uint_8_list *session_id,
                                      bool force_relay,
                                      struct wire_uint_8_list *password,
                                      bool is_shared_password,
-                                     struct wire_uint_8_list *conn_token);
+                                     struct wire_uint_8_list *conn_token,
+                                     struct wire_uint_8_list *login_method);
 
 void wire_session_start(int64_t port_,
                         struct wire_uint_8_list *session_id,
@@ -974,6 +985,8 @@ void wire_main_get_trusted_devices(int64_t port_);
 
 void wire_main_remove_trusted_devices(int64_t port_, struct wire_uint_8_list *json);
 
+void wire_main_renew_trusted_devices(int64_t port_, struct wire_uint_8_list *json);
+
 void wire_main_clear_trusted_devices(int64_t port_);
 
 WireSyncReturn wire_main_max_encrypt_len(void);
@@ -1359,6 +1372,7 @@ static int64_t dummy_method_to_enforce_bundling(void) {
     dummy_var ^= ((int64_t) (void*) wire_main_check_hwcodec);
     dummy_var ^= ((int64_t) (void*) wire_main_get_trusted_devices);
     dummy_var ^= ((int64_t) (void*) wire_main_remove_trusted_devices);
+    dummy_var ^= ((int64_t) (void*) wire_main_renew_trusted_devices);
     dummy_var ^= ((int64_t) (void*) wire_main_clear_trusted_devices);
     dummy_var ^= ((int64_t) (void*) wire_main_max_encrypt_len);
     dummy_var ^= ((int64_t) (void*) wire_session_request_new_display_init_msgs);
