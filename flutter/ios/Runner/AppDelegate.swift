@@ -10,7 +10,6 @@ import AVFoundation
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
     do {
       // Mix remote audio with other apps while still respecting silent mode.
       try AVAudioSession.sharedInstance().setCategory(.ambient)
@@ -114,14 +113,21 @@ import AVFoundation
     }
   }
 
-  @discardableResult
-  public func dummyMethodToEnforceBundling() -> Int64 {
-    let v1 = dummy_method_to_enforce_bundling()
-    let v2 = Int64(Int(bitPattern: session_get_rgba(nil, 0)))
-    if v1 == 0x7fffffff_ffffffff && v2 == 0x7fffffff_ffffffff {
-      NSLog("FFI bundle ref: %lld %lld", v1, v2)
+  // With the UIScene life cycle, the FlutterViewController only exists once the scene
+  // connects, and FlutterAppDelegate reaches its engine through `window`. A launch URL
+  // also arrives with the scene instead of in launchOptions, so forward it to plugins here.
+  func sceneWillConnect(window: UIWindow?, launchURL: URL?) {
+    self.window = window
+    GeneratedPluginRegistrant.register(with: self)
+    var launchOptions: [UIApplication.LaunchOptionsKey: Any] = [:]
+    if let launchURL = launchURL {
+      launchOptions[.url] = launchURL
     }
-    return v1 ^ v2
+    _ = super.application(UIApplication.shared, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  public func dummyMethodToEnforceBundling() {
+      dummy_method_to_enforce_bundling();
+    session_get_rgba(nil, 0);
   }
 }
-

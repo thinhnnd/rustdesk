@@ -55,6 +55,7 @@ abstract class Rustdesk {
       required String password,
       required bool isSharedPassword,
       String? connToken,
+      required String loginMethod,
       dynamic hint});
 
   FlutterRustBridgeTaskConstMeta get kSessionAddSyncConstMeta;
@@ -1623,6 +1624,10 @@ abstract class Rustdesk {
 
   FlutterRustBridgeTaskConstMeta get kMainRemoveTrustedDevicesConstMeta;
 
+  Future<void> mainRenewTrustedDevices({required String json, dynamic hint});
+
+  FlutterRustBridgeTaskConstMeta get kMainRenewTrustedDevicesConstMeta;
+
   Future<void> mainClearTrustedDevices({dynamic hint});
 
   FlutterRustBridgeTaskConstMeta get kMainClearTrustedDevicesConstMeta;
@@ -1843,6 +1848,7 @@ class RustdeskImpl implements Rustdesk {
       required String password,
       required bool isSharedPassword,
       String? connToken,
+      required String loginMethod,
       dynamic hint}) {
     var arg0 = _platform.api2wire_Uuid(sessionId);
     var arg1 = _platform.api2wire_String(id);
@@ -1856,9 +1862,10 @@ class RustdeskImpl implements Rustdesk {
     var arg9 = _platform.api2wire_String(password);
     var arg10 = isSharedPassword;
     var arg11 = _platform.api2wire_opt_String(connToken);
+    var arg12 = _platform.api2wire_String(loginMethod);
     return _platform.executeSync(FlutterRustBridgeSyncTask(
       callFfi: () => _platform.inner.wire_session_add_sync(arg0, arg1, arg2,
-          arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11),
+          arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12),
       parseSuccessData: _wire2api_String,
       constMeta: kSessionAddSyncConstMeta,
       argValues: [
@@ -1873,7 +1880,8 @@ class RustdeskImpl implements Rustdesk {
         forceRelay,
         password,
         isSharedPassword,
-        connToken
+        connToken,
+        loginMethod
       ],
       hint: hint,
     ));
@@ -1894,7 +1902,8 @@ class RustdeskImpl implements Rustdesk {
           "forceRelay",
           "password",
           "isSharedPassword",
-          "connToken"
+          "connToken",
+          "loginMethod"
         ],
       );
 
@@ -7596,6 +7605,24 @@ class RustdeskImpl implements Rustdesk {
         argNames: ["json"],
       );
 
+  Future<void> mainRenewTrustedDevices({required String json, dynamic hint}) {
+    var arg0 = _platform.api2wire_String(json);
+    return _platform.executeNormal(FlutterRustBridgeTask(
+      callFfi: (port_) =>
+          _platform.inner.wire_main_renew_trusted_devices(port_, arg0),
+      parseSuccessData: _wire2api_unit,
+      constMeta: kMainRenewTrustedDevicesConstMeta,
+      argValues: [json],
+      hint: hint,
+    ));
+  }
+
+  FlutterRustBridgeTaskConstMeta get kMainRenewTrustedDevicesConstMeta =>
+      const FlutterRustBridgeTaskConstMeta(
+        debugName: "main_renew_trusted_devices",
+        argNames: ["json"],
+      );
+
   Future<void> mainClearTrustedDevices({dynamic hint}) {
     return _platform.executeNormal(FlutterRustBridgeTask(
       callFfi: (port_) =>
@@ -8193,6 +8220,7 @@ class RustdeskWire implements FlutterRustBridgeWireBase {
     ffi.Pointer<wire_uint_8_list> password,
     bool is_shared_password,
     ffi.Pointer<wire_uint_8_list> conn_token,
+    ffi.Pointer<wire_uint_8_list> login_method,
   ) {
     return _wire_session_add_sync(
       session_id,
@@ -8207,6 +8235,7 @@ class RustdeskWire implements FlutterRustBridgeWireBase {
       password,
       is_shared_password,
       conn_token,
+      login_method,
     );
   }
 
@@ -8225,6 +8254,7 @@ class RustdeskWire implements FlutterRustBridgeWireBase {
             ffi.Pointer<wire_uint_8_list>,
             ffi.Bool,
             ffi.Pointer<wire_uint_8_list>,
+            ffi.Pointer<wire_uint_8_list>,
           )>>('wire_session_add_sync');
   late final _wire_session_add_sync = _wire_session_add_syncPtr.asFunction<
       WireSyncReturn Function(
@@ -8239,6 +8269,7 @@ class RustdeskWire implements FlutterRustBridgeWireBase {
         bool,
         ffi.Pointer<wire_uint_8_list>,
         bool,
+        ffi.Pointer<wire_uint_8_list>,
         ffi.Pointer<wire_uint_8_list>,
       )>();
 
@@ -13074,6 +13105,21 @@ class RustdeskWire implements FlutterRustBridgeWireBase {
       _wire_main_remove_trusted_devicesPtr
           .asFunction<void Function(int, ffi.Pointer<wire_uint_8_list>)>();
 
+  void wire_main_renew_trusted_devices(
+    int port_,
+    ffi.Pointer<wire_uint_8_list> json,
+  ) {
+    return _wire_main_renew_trusted_devices(port_, json);
+  }
+
+  late final _wire_main_renew_trusted_devicesPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Void Function(ffi.Int64, ffi.Pointer<wire_uint_8_list>)>>(
+      'wire_main_renew_trusted_devices');
+  late final _wire_main_renew_trusted_devices =
+      _wire_main_renew_trusted_devicesPtr
+          .asFunction<void Function(int, ffi.Pointer<wire_uint_8_list>)>();
+
   void wire_main_clear_trusted_devices(int port_) {
     return _wire_main_clear_trusted_devices(port_);
   }
@@ -13506,6 +13552,16 @@ typedef XID = ffi.UnsignedLong;
 const int VIDEO_QUEUE_SIZE = 120;
 
 const int AUDIO_BUFFER_MS = 3000;
+
+const int TOKEN_BYTES = 32;
+
+const int MAX_RECORDS = 128;
+
+const int DEFAULT_DAYS = 90;
+
+const int NEVER_EXPIRE = 0;
+
+const int DAY_MILLIS = 86400000;
 
 const int CLIPBOARD_INTERVAL = 333;
 
