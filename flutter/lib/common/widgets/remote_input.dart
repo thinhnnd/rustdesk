@@ -606,6 +606,9 @@ class _RawTouchGestureDetectorRegionState
         await ffi.cursorModel
             .move(_cacheLongPressPosition.dx, _cacheLongPressPosition.dy);
       }
+      // A multi-finger upgrade may have ended this pan while the moves above
+      // were in flight; don't send a stray left-button down afterwards.
+      if (!_touchModePanStarted) return;
       // In relative mouse mode, skip mouse down - only send movement via sendMobileRelativeMouseMove
       if (!inputModel.relativeMouseMode.value) {
         await inputModel.sendMouse('down', MouseButtons.left);
@@ -827,11 +830,11 @@ class _RawTouchGestureDetectorRegionState
       // mobile
       _scale = 1;
     }
-    if (!isSpecialHoldDragActive &&
-        handleTouch &&
-        _touchModePanStarted &&
-        !_touchModePanIsCanvasMove) {
-      _touchModePanStarted = false;
+    final wasTouchPanActive =
+        handleTouch && _touchModePanStarted && !_touchModePanIsCanvasMove;
+    _touchModePanStarted = false;
+    _touchModePanIsCanvasMove = false;
+    if (!isSpecialHoldDragActive && wasTouchPanActive) {
       await inputModel.sendMouse('up', MouseButtons.left);
     }
   }

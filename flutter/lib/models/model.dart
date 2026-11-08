@@ -1908,7 +1908,8 @@ class VirtualMouseMode with ChangeNotifier {
   }
 
   setCursorSpeed(double s) {
-    final clamped = s.clamp(0.4, 2.5).toDouble();
+    if (!s.isFinite) return;
+    final clamped = s.clamp(0.5, 2.0).toDouble();
     if (clamped == _cursorSpeed) return;
     _cursorSpeed = clamped;
     bind.mainSetLocalOption(
@@ -1930,8 +1931,18 @@ class VirtualMouseMode with ChangeNotifier {
     _showVirtualMouse = savedOpt.isEmpty ? true : savedOpt == 'Y';
     final savedTouchOpt =
         bind.mainGetLocalOption(key: _kOptionShowTouchVirtualMouse);
-    // Default to false in Touch mode (just like DeskIn) unless explicitly enabled ('Y')
-    _showTouchVirtualMouse = savedTouchOpt == 'Y';
+    // Migrate the legacy `show-virtual-mouse` option once: users who
+    // explicitly enabled it ('Y') keep the floating mouse in Touch mode.
+    // Persist the migrated value so later changes to the mouse-mode option
+    // do not silently toggle the touch-mode setting.
+    if (savedTouchOpt.isEmpty && savedOpt == 'Y') {
+      _showTouchVirtualMouse = true;
+      unawaited(bind.mainSetLocalOption(
+          key: _kOptionShowTouchVirtualMouse, value: 'Y'));
+    } else {
+      // Default to false in Touch mode (just like DeskIn) unless explicitly enabled ('Y')
+      _showTouchVirtualMouse = savedTouchOpt == 'Y';
+    }
     final savedWheelOpt =
         bind.mainGetLocalOption(key: _kOptionShowVirtualScrollWheel);
     _showVirtualScrollWheel =
@@ -1939,9 +1950,11 @@ class VirtualMouseMode with ChangeNotifier {
     _virtualMouseScale = double.tryParse(
             bind.mainGetLocalOption(key: kOptionVirtualMouseScale)) ??
         1.0;
-    _cursorSpeed = double.tryParse(
-            bind.mainGetLocalOption(key: _kOptionMobileCursorSpeed)) ??
-        1.0;
+    final parsedSpeed = double.tryParse(
+        bind.mainGetLocalOption(key: _kOptionMobileCursorSpeed));
+    _cursorSpeed = (parsedSpeed != null && parsedSpeed.isFinite)
+        ? parsedSpeed.clamp(0.5, 2.0).toDouble()
+        : 1.0;
     _showVirtualJoystick =
         bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y';
     notifyListeners();
