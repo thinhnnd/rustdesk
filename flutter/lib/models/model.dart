@@ -1931,18 +1931,8 @@ class VirtualMouseMode with ChangeNotifier {
     _showVirtualMouse = savedOpt.isEmpty ? true : savedOpt == 'Y';
     final savedTouchOpt =
         bind.mainGetLocalOption(key: _kOptionShowTouchVirtualMouse);
-    // Migrate the legacy `show-virtual-mouse` option once: users who
-    // explicitly enabled it ('Y') keep the floating mouse in Touch mode.
-    // Persist the migrated value so later changes to the mouse-mode option
-    // do not silently toggle the touch-mode setting.
-    if (savedTouchOpt.isEmpty && savedOpt == 'Y') {
-      _showTouchVirtualMouse = true;
-      unawaited(bind.mainSetLocalOption(
-          key: _kOptionShowTouchVirtualMouse, value: 'Y'));
-    } else {
-      // Default to false in Touch mode (just like DeskIn) unless explicitly enabled ('Y')
-      _showTouchVirtualMouse = savedTouchOpt == 'Y';
-    }
+    // Default to false in Touch mode (just like DeskIn) unless explicitly enabled ('Y')
+    _showTouchVirtualMouse = savedTouchOpt == 'Y';
     final savedWheelOpt =
         bind.mainGetLocalOption(key: _kOptionShowVirtualScrollWheel);
     _showVirtualScrollWheel =
