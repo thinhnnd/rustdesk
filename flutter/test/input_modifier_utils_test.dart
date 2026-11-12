@@ -220,16 +220,55 @@ void main() {
     });
   });
 
-  group('shouldClearTerminalModifiersWhenRow3Collapses', () {
-    test('clears visible modifier state when expanded row is collapsed', () {
+  group('staleNonTouchModifiers', () {
+    test('flags a cached modifier whose key is no longer held', () {
       expect(
-        shouldClearTerminalModifiersWhenRow3Collapses(
-          wasExpanded: true,
-          willExpand: false,
-          ctrlLocked: true,
-          altLocked: false,
+        staleNonTouchModifiers(
+          ctrl: false,
+          alt: false,
+          shift: false,
+          command: true,
+          ctrlPressed: false,
+          altPressed: false,
+          shiftPressed: false,
+          metaPressed: false,
+          touchModifiers: const {},
         ),
-        isTrue,
+        {'command'},
+      );
+    });
+
+    test('keeps a modifier that is still physically held', () {
+      expect(
+        staleNonTouchModifiers(
+          ctrl: false,
+          alt: false,
+          shift: false,
+          command: true,
+          ctrlPressed: false,
+          altPressed: false,
+          shiftPressed: false,
+          metaPressed: true,
+          touchModifiers: const {},
+        ),
+        isEmpty,
+      );
+    });
+
+    test('keeps a touch sticky that is not physically held', () {
+      expect(
+        staleNonTouchModifiers(
+          ctrl: false,
+          alt: false,
+          shift: false,
+          command: true,
+          ctrlPressed: false,
+          altPressed: false,
+          shiftPressed: false,
+          metaPressed: false,
+          touchModifiers: const {'command'},
+        ),
+        isEmpty,
       );
     });
   });

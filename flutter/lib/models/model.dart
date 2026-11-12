@@ -4449,6 +4449,16 @@ class FFI {
       ffiModel.cancelPendingRestoreTimer();
       ffiModel.resetRestartReconnectState();
       dialogManager.dismissAll();
+      // The activation click that brings up the password box on a remote
+      // login screen is normally sent by the waiting-for-image timer, but
+      // that timer only fires when the first frame is slow to arrive. A
+      // fast peer (for example a locked Mac still streaming the lock
+      // screen) cancels it, leaving the login UI inactive so typed
+      // characters are swallowed. Send the same harmless right-click
+      // activation now; it is a no-op on an unlocked macOS desktop.
+      if (isMobile && ffiModel.pi.platform == kPeerPlatformMacOS) {
+        bind.sessionInputOsPassword(sessionId: sessionId, value: '');
+      }
       try {
         await canvasModel.updateViewStyle();
         await canvasModel.updateScrollStyle();

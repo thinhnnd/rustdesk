@@ -45,6 +45,40 @@ bool shouldReleaseStaleMobileShift({
   return true;
 }
 
+/// Returns the names of modifiers whose cached flag is on but whose key is
+/// neither physically held nor toggled on the on-screen shortcut bar.
+///
+/// Hardware key-up events can be lost when an app-switch combo takes focus
+/// away (for example Cmd+Tab), leaving a flag stuck on and turning every
+/// following inputKey call into a shortcut on the peer instead of text.
+/// A flag that is only touch-sticky is intentional and must be kept.
+Set<String> staleNonTouchModifiers({
+  required bool ctrl,
+  required bool alt,
+  required bool shift,
+  required bool command,
+  required bool ctrlPressed,
+  required bool altPressed,
+  required bool shiftPressed,
+  required bool metaPressed,
+  required Set<String> touchModifiers,
+}) {
+  final stale = <String>{};
+  if (ctrl && !ctrlPressed && !touchModifiers.contains('ctrl')) {
+    stale.add('ctrl');
+  }
+  if (alt && !altPressed && !touchModifiers.contains('alt')) {
+    stale.add('alt');
+  }
+  if (shift && !shiftPressed && !touchModifiers.contains('shift')) {
+    stale.add('shift');
+  }
+  if (command && !metaPressed && !touchModifiers.contains('command')) {
+    stale.add('command');
+  }
+  return stale;
+}
+
 /// Applies the terminal Ctrl/Alt one-shot modifiers to a single input payload.
 ///
 String applyTerminalInputModifiers(

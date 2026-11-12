@@ -252,6 +252,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+      // Hardware key-up events can be lost while the app is in the
+      // background (for example Cmd+Tab app switching). Reconcile so a
+      // stuck flag does not turn following input into shortcuts.
+      inputModel.reconcileStaleModifiers();
     } else if (state == AppLifecycleState.paused) {
       // Auto Lock Screen (DeskIn): lock the remote screen when the app is
       // hidden. Uses a dedicated local option so it does not arm the peer's
@@ -482,6 +486,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     if (!inputModel.keyboardInputAllowed) {
       return;
     }
+    // A modifier flag stuck from a lost hardware key-up would turn every
+    // character into a shortcut on the peer, silently dropping the input.
+    inputModel.reconcileStaleModifiers();
     if (isIOS) {
       _handleIOSSoftKeyboardInput(newValue);
     } else {
@@ -713,6 +720,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       return;
     }
     _openKeyboardUnlocked();
+    // A macOS peer at the login/lock screen only reveals its password box
+    // after an input activation; the remote can also (re)lock mid-session
+    // via Auto Lock Screen. Send the same harmless right-click the
+    // waiting-for-image path uses. It is a no-op on an unlocked macOS
+    // desktop because the menu bar ignores right clicks.
+    if (gFFI.ffiModel.pi.platform == kPeerPlatformMacOS) {
+      bind.sessionInputOsPassword(sessionId: sessionId, value: '');
+    }
   }
 
   void _openKeyboardUnlocked() {
@@ -3281,11 +3296,14 @@ void sendPrompt(bool isMac, String key) {
   } else {
     gFFI.inputModel.ctrl = true;
   }
-  gFFI.inputModel.inputKey(key);
-  if (isMac) {
-    gFFI.inputModel.command = old;
-  } else {
-    gFFI.inputModel.ctrl = old;
+  try {
+    gFFI.inputModel.inputKey(key);
+  } finally {
+    if (isMac) {
+      gFFI.inputModel.command = old;
+    } else {
+      gFFI.inputModel.ctrl = old;
+    }
   }
 }
 
