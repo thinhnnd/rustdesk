@@ -113,8 +113,9 @@ jobs:
 
       - name: Distribute build to internal TestFlight group
         run: |
-          python3 -m pip install --quiet pyjwt cryptography
-          python3 <<'PY'
+          python3 -m venv /tmp/ascenv
+          /tmp/ascenv/bin/pip install --quiet pyjwt cryptography
+          /tmp/ascenv/bin/python <<'PY'
           import json, time, urllib.request
           import jwt
 
