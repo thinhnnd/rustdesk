@@ -306,20 +306,30 @@ jobs:
 
           key_id = "${{ secrets.APP_STORE_CONNECT_KEY_ID }}"
 
+          # Poll the buildUploads endpoint: the upload is listed as soon as
+          # altool delivers it, and its state carries real errors on
+          # rejection. The `builds` resource only appears after Apple's
+          # processing finishes, which can take 45+ minutes.
           build_id = None
-          for _ in range(30):
-              _, data = api("GET", f"/builds?filter[app]={APP_ID}"
-                                   f"&filter[version]={BUILD_NUMBER}&limit=1")
-              if data.get("data"):
-                  build_id = data["data"][0]["id"]
-                  state = data["data"][0]["attributes"].get("processingState")
-                  if state == "VALID":
-                      break
-                  if state == "FAILED" or state == "INVALID":
-                      raise SystemExit(f"Build {build_id} processing state: {state}")
-              time.sleep(20)
+          for _ in range(45):
+              _, data = api("GET", f"/apps/{APP_ID}/buildUploads?limit=10")
+              for u in data.get("data", []):
+                  a = u["attributes"]
+                  if a.get("cfBundleVersion") != BUILD_NUMBER:
+                      continue
+                  state = a.get("state", {}).get("state")
+                  errors = a.get("state", {}).get("errors")
+                  if state == "FAILED" or errors:
+                      raise SystemExit(
+                          f"Build upload {u['id']} state: {state} {errors}")
+                  if state == "COMPLETE":
+                      build_id = u["id"]
+                  break
+              if build_id:
+                  break
+              time.sleep(60)
           if not build_id:
-              raise SystemExit("Uploaded build never appeared in App Store Connect")
+              raise SystemExit("Uploaded build still not processed by App Store Connect")
 
           for _ in range(10):
               status, _ = api(
