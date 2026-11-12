@@ -1,9 +1,11 @@
 # Build the iOS/iPadOS IPA and upload it to TestFlight.
 #
-# Fast path: this branch ships a prebuilt Rust core at
-# `prebuilt/ios/liblibrustdesk.a.gz` (see run_ios.sh), so the pipeline does NOT
-# run vcpkg/cargo/flutter_rust_bridge_codegen. A guard below fails the run if
-# Rust-side sources changed after PREBUILT_BASE, so a stale lib is never shipped.
+# Rust core strategy: this branch ships a prebuilt Rust library at
+# `prebuilt/ios/liblibrustdesk.a.gz` (see run_ios.sh). When only Dart-side code
+# changed since PREBUILT_BASE the lib is reused (fast path, ~8 min). When Rust
+# sources changed, the pipeline rebuilds it from source: flutter_rust_bridge
+# codegen on Linux, then vcpkg + cargo on the macOS runner.
+# PREBUILT_BASE must be updated whenever the prebuilt lib is regenerated.
 #
 # One-time Apple-side setup (already done, kept here for reference):
 #   - App ID `com.thinhnnd.rustdesk` and app "RustDesk Gold" on App Store Connect
@@ -30,39 +32,199 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  RUST_VERSION: "1.75"
   FLUTTER_VERSION: "3.35.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
   # Commit that produced prebuilt/ios/liblibrustdesk.a.gz. Update this when the
   # prebuilt library is regenerated.
   PREBUILT_BASE: "995dbd936eadd94f66fc0b4bf3315a804694833e"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_CMAKE_VERSION: "4.3.0"
 
 jobs:
-  build-ios-testflight:
-    name: build and upload to TestFlight
-    runs-on: macos-latest
+  # Decides whether the Rust core can come from prebuilt/ios/ or must be
+  # rebuilt because Rust-side sources changed after PREBUILT_BASE.
+  check-lib:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.diff.outputs.rust_changed }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          # Full history so the prebuilt-lib freshness check can diff against
-          # PREBUILT_BASE.
           fetch-depth: 0
 
-      - name: Verify prebuilt Rust core is current
+      - name: Check for Rust-side changes
+        id: diff
         run: |
           CHANGED=$(git diff --name-only ${{ env.PREBUILT_BASE }} HEAD -- \
             src/ libs/ Cargo.toml Cargo.lock build.rs res/vcpkg res/vcpkg-triplets vcpkg.json)
-          if [ -n "$CHANGED" ]; then
-            echo "Rust-side sources changed since the prebuilt lib was made:"
+          if [ -z "$CHANGED" ]; then
+            echo "rust_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Rust-side changes since PREBUILT_BASE:"
             echo "$CHANGED"
-            echo "Rebuild prebuilt/ios/liblibrustdesk.a.gz (and update PREBUILT_BASE),"
-            echo "or extend this workflow to build the Rust core from source."
-            exit 1
           fi
 
+  # Inline copy of the default (Flutter 3.22.3) leg of bridge.yml. The reusable
+  # workflow also builds a 3.44 bridge artifact for Windows arm64 that iOS never
+  # consumes, and its patch script can fail independently of this pipeline, so
+  # this job is kept self-contained.
+  generate-bridge:
+    needs: check-lib
+    if: needs.check-lib.outputs.rust_changed == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get install ca-certificates -y
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            gcc \
+            git \
+            g++ \
+            libclang-dev \
+            libgtk-3-dev \
+            llvm-dev \
+            nasm \
+            ninja-build \
+            pkg-config \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: bridge-ubuntu-22.04
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install flutter rust bridge deps
+        shell: bash
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features "uuid" --locked
+          # Downgrade extended_text so `flutter pub get` resolves under the old
+          # codegen SDK; codegen does not consume this package's API.
+          sed -i -E 's/^([[:space:]]*)extended_text:.*/\1extended_text: 13.0.0/' flutter/pubspec.yaml
+          rm -f flutter/pubspec.lock
+          pushd flutter && flutter pub get && popd
+
+      - name: Run flutter rust bridge
+        run: |
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bridge-artifact
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+            ./flutter/macos/Runner/bridge_generated.h
+            ./flutter/ios/Runner/bridge_generated.h
+
+  build-ios-testflight:
+    name: build and upload to TestFlight
+    needs: [check-lib, generate-bridge]
+    if: always() && needs.check-lib.result == 'success' && needs.generate-bridge.result != 'failure'
+    runs-on: macos-latest
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
       - name: Unpack prebuilt Rust core
+        if: needs.check-lib.outputs.rust_changed != 'true'
         run: |
           mkdir -p target/aarch64-apple-ios/release
           gunzip -c prebuilt/ios/liblibrustdesk.a.gz > target/aarch64-apple-ios/release/liblibrustdesk.a
+
+      - name: Install vcpkg build tools
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: brew install nasm yasm
+
+      - name: Setup vcpkg with Github Actions binary cache
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet arm64-ios \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install Rust toolchain
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        with:
+          prefix-key: rustdesk-lib-cache-ios
+          key: aarch64-apple-ios
+
+      - name: Restore bridge files
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Build rustdesk lib
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: |
+          cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
