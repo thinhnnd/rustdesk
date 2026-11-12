@@ -111,6 +111,65 @@ jobs:
             --apiKey "${{ secrets.APP_STORE_CONNECT_KEY_ID }}" \
             --apiIssuer "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}"
 
+      - name: Distribute build to internal TestFlight group
+        run: |
+          python3 -m pip install --quiet pyjwt cryptography
+          python3 <<'PY'
+          import json, time, urllib.request
+          import jwt
+
+          APP_ID = "6833731204"
+          GROUP_ID = "c981bf7f-5e4e-4628-8ada-715e8f5e34e7"
+          BUILD_NUMBER = "${{ github.run_number }}"
+          BASE = "https://api.appstoreconnect.apple.com/v1"
+
+          def api(method, path, body=None):
+              token = jwt.encode(
+                  {"iss": "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}",
+                   "iat": int(time.time()), "exp": int(time.time()) + 900,
+                   "aud": "appstoreconnect-v1"},
+                  open(f"/Users/runner/private_keys/AuthKey_{key_id}.p8").read(),
+                  algorithm="ES256", headers={"kid": key_id})
+              req = urllib.request.Request(
+                  BASE + path, method=method,
+                  data=json.dumps(body).encode() if body else None,
+                  headers={"Authorization": f"Bearer {token}",
+                           "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.loads(r.read() or b"{}")
+              except urllib.error.HTTPError as e:
+                  return e.code, json.loads(e.read() or b"{}")
+
+          key_id = "${{ secrets.APP_STORE_CONNECT_KEY_ID }}"
+
+          build_id = None
+          for _ in range(30):
+              _, data = api("GET", f"/builds?filter[app]={APP_ID}"
+                                   f"&filter[version]={BUILD_NUMBER}&limit=1")
+              if data.get("data"):
+                  build_id = data["data"][0]["id"]
+                  state = data["data"][0]["attributes"].get("processingState")
+                  if state == "VALID":
+                      break
+                  if state == "FAILED" or state == "INVALID":
+                      raise SystemExit(f"Build {build_id} processing state: {state}")
+              time.sleep(20)
+          if not build_id:
+              raise SystemExit("Uploaded build never appeared in App Store Connect")
+
+          for _ in range(10):
+              status, _ = api(
+                  "POST", f"/betaGroups/{GROUP_ID}/relationships/builds",
+                  {"data": [{"type": "builds", "id": build_id}]})
+              if status in (200, 201, 204):
+                  print(f"Build {build_id} assigned to Internal Testers")
+                  break
+              time.sleep(20)
+          else:
+              raise SystemExit("Could not assign build to Internal Testers group")
+          PY
+
       - name: Upload IPA artifact
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
