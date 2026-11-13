@@ -39,46 +39,102 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
 
   var _currentState = GestureState.none;
 
+  static GestureState _stateForPointerCount(int count) {
+    if (count >= 3) return GestureState.threeFingerVerticalDrag;
+    if (count == 2) return GestureState.twoFingerScale;
+    if (count == 1) return GestureState.oneFingerPan;
+    return GestureState.none;
+  }
+
+  static int _stateRank(GestureState state) => switch (state) {
+        GestureState.oneFingerPan => 1,
+        GestureState.twoFingerScale => 2,
+        GestureState.threeFingerVerticalDrag => 3,
+        GestureState.none => 0,
+      };
+
+  void _startState(GestureState state,
+      {required Offset focalPoint,
+      required Offset localFocalPoint,
+      int pointerCount = 0}) {
+    switch (state) {
+      case GestureState.oneFingerPan:
+        onOneFingerPanStart?.call(DragStartDetails(
+          localPosition: localFocalPoint,
+          globalPosition: focalPoint,
+        ));
+        break;
+      case GestureState.twoFingerScale:
+        onTwoFingerScaleStart?.call(ScaleStartDetails(
+          localFocalPoint: localFocalPoint,
+          focalPoint: focalPoint,
+          pointerCount: pointerCount,
+        ));
+        break;
+      case GestureState.threeFingerVerticalDrag:
+        onThreeFingerVerticalDragStart?.call(
+          DragStartDetails(globalPosition: localFocalPoint),
+        );
+        break;
+      case GestureState.none:
+        break;
+    }
+  }
+
+  void _endState(GestureState state, ScaleEndDetails d) {
+    switch (state) {
+      case GestureState.oneFingerPan:
+        onOneFingerPanEnd?.call(_getDragEndDetails(d));
+        break;
+      case GestureState.twoFingerScale:
+        onTwoFingerScaleEnd?.call(d);
+        break;
+      case GestureState.threeFingerVerticalDrag:
+        onThreeFingerVerticalDragEnd?.call(_getDragEndDetails(d));
+        break;
+      case GestureState.none:
+        break;
+    }
+  }
+
   void _init() {
     onStart = (d) {
-      if (d.pointerCount == 1) {
-        _currentState = GestureState.oneFingerPan;
-        onOneFingerPanStart?.call(DragStartDetails(
-          localPosition: d.localFocalPoint,
-          globalPosition: d.focalPoint,
-        ));
-      } else if (d.pointerCount == 2) {
-        _currentState = GestureState.twoFingerScale;
-        onTwoFingerScaleStart?.call(d);
-      } else if (d.pointerCount >= 3) {
-        _currentState = GestureState.threeFingerVerticalDrag;
-        onThreeFingerVerticalDragStart?.call(
-          DragStartDetails(globalPosition: d.localFocalPoint),
-        );
-      }
+      _currentState = _stateForPointerCount(d.pointerCount);
+      _startState(_currentState,
+          focalPoint: d.focalPoint,
+          localFocalPoint: d.localFocalPoint,
+          pointerCount: d.pointerCount);
     };
     onUpdate = (d) {
-      if (d.pointerCount == 1 && _currentState != GestureState.oneFingerPan) {
-        _currentState = GestureState.oneFingerPan;
-        onOneFingerPanStart?.call(DragStartDetails(
-          localPosition: d.localFocalPoint,
-          globalPosition: d.focalPoint,
-        ));
-      } else if (d.pointerCount == 2 &&
-          _currentState != GestureState.twoFingerScale) {
-        _currentState = GestureState.twoFingerScale;
-        onTwoFingerScaleStart?.call(ScaleStartDetails(
-          localFocalPoint: d.localFocalPoint,
-          focalPoint: d.focalPoint,
-          pointerCount: d.pointerCount,
-        ));
-      } else if (d.pointerCount >= 3 &&
-          _currentState != GestureState.threeFingerVerticalDrag) {
-        _currentState = GestureState.threeFingerVerticalDrag;
-        onThreeFingerVerticalDragStart?.call(
-          DragStartDetails(globalPosition: d.localFocalPoint),
-        );
+      // Only allow upgrading to a higher finger-count state. Lifting a finger
+      // mid-gesture must not restart a lower state, otherwise the tail of a
+      // pinch/three-finger gesture would fire a fresh one-finger pan (and a
+      // stray remote left-button drag). The current state keeps receiving
+      // updates until the whole gesture ends.
+      final target = _stateForPointerCount(d.pointerCount);
+      if (target != _currentState &&
+          _stateRank(target) > _stateRank(_currentState)) {
+        _endState(
+            _currentState,
+            ScaleEndDetails(
+                velocity: Velocity.zero, pointerCount: d.pointerCount));
+        _currentState = target;
+        _startState(target,
+            focalPoint: d.focalPoint,
+            localFocalPoint: d.localFocalPoint,
+            pointerCount: d.pointerCount);
       }
+
+      // Once the finger count drops below what the active state needs, keep
+      // the state (so onEnd still pairs) but stop dispatching updates: the
+      // remaining finger(s) must not keep scrolling, panning, or switching
+      // screens as if the full gesture were still active.
+      final requiredPointers = switch (_currentState) {
+        GestureState.twoFingerScale => 2,
+        GestureState.threeFingerVerticalDrag => 3,
+        _ => 1,
+      };
+      if (d.pointerCount < requiredPointers) return;
 
       switch (_currentState) {
         case GestureState.oneFingerPan:
@@ -95,19 +151,7 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
       }
     };
     onEnd = (d) {
-      switch (_currentState) {
-        case GestureState.oneFingerPan:
-          onOneFingerPanEnd?.call(_getDragEndDetails(d));
-          break;
-        case GestureState.twoFingerScale:
-          onTwoFingerScaleEnd?.call(d);
-          break;
-        case GestureState.threeFingerVerticalDrag:
-          onThreeFingerVerticalDragEnd?.call(_getDragEndDetails(d));
-          break;
-        default:
-          break;
-      }
+      _endState(_currentState, d);
       _currentState = GestureState.none;
     };
   }

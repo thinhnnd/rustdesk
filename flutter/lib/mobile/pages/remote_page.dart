@@ -90,6 +90,8 @@ class RemotePage extends StatefulWidget {
   State<RemotePage> createState() => _RemotePageState(id);
 }
 
+const String _kAutoLockOnPauseOption = 'deskin-auto-lock-on-pause';
+
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
   bool _showBar = false;
@@ -112,6 +114,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
   Timer? _iosKeyboardWorkaroundTimer;
+  Timer? _orientationResetTimer;
 
   final _blockableOverlayState = BlockableOverlayState();
 
@@ -235,6 +238,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _capsuleHoldTimer?.cancel();
     _iosKeyboardWorkaroundTimer?.cancel();
+    _orientationResetTimer?.cancel();
     gFFI.dialogManager.dismissAll();
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
         overlays: SystemUiOverlay.values);
@@ -252,12 +256,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
     } else if (state == AppLifecycleState.paused) {
-      // Nếu bật "Auto Lock Screen", tự động khóa màn hình máy từ xa khi tắt màn hình iPad / ẩn app
-      if (!gFFI.ffiModel.viewOnly &&
+      // Auto Lock Screen (DeskIn): lock the remote screen when the app is
+      // hidden. Uses a dedicated local option so it does not arm the peer's
+      // session-level `lock-after-session-end` behavior.
+      if (bind.mainGetLocalOption(key: _kAutoLockOnPauseOption) == 'Y' &&
+          gFFI.ffiModel.pi.version.isNotEmpty &&
+          !gFFI.ffiModel.viewOnly &&
           gFFI.ffiModel.keyboard &&
-          !gFFI.ffiModel.isPeerAndroid &&
-          bind.sessionGetToggleOptionSync(
-              sessionId: sessionId, arg: 'lock-after-session-end')) {
+          !gFFI.ffiModel.isPeerAndroid) {
         bind.sessionLockScreen(sessionId: sessionId);
       }
     }
@@ -336,6 +342,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           _physicalFocusNode.unfocus();
           _iosKeyboardWorkaroundTimer = Timer(Duration(milliseconds: 50), () {
             if (!mounted || gFFI.chatModel.inputNode.hasFocus) return;
+            // Do not steal focus back if another field/dialog took it
+            // meanwhile. A FocusScopeNode is just the resting focus after
+            // unfocus(), not a real input, so the refocus must still run.
+            final primary = FocusManager.instance.primaryFocus;
+            if (primary != null &&
+                primary != _physicalFocusNode &&
+                primary is! FocusScopeNode) {
+              return;
+            }
             _physicalFocusNode.requestFocus();
           });
         });
@@ -385,7 +400,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // 1. The composing range is valid
     // 2. The new string is shorter than the composing range.
     // Lưu ý: Không chặn khi đang gõ ký tự ASCII thuần (bàn phím tiếng Anh trên iPad gõ Telex/VNI cho Mac)
-    final isPureAscii = newStr.isNotEmpty &&
+    // Lưu ý: bypass chỉ áp dụng cho peer macOS (Telex/VNI trên iPad gõ cho
+    // bộ gõ tiếng Việt của Mac). Peer khác giữ nguyên hành vi giữ composing.
+    final isPureAscii = gFFI.ffiModel.pi.platform == kPeerPlatformMacOS &&
+        newStr.isNotEmpty &&
         newStr.codeUnits.every((u) => u < 128) &&
         subOldValue.codeUnits.every((u) => u < 128);
     if (!isPureAscii && _textController.value.isComposingRangeValid) {
@@ -482,7 +500,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   void _sendSoftKeyBackspace() {
     if (!inputModel.keyboardInputAllowed) return;
-    if (!_hasStickyMobileModifier && !gFFI.ffiModel.isPeerAndroid) {
+    if (!_hasStickyMobileModifier &&
+        gFFI.ffiModel.pi.platform == kPeerPlatformMacOS) {
       // Gửi mã phím phần cứng USB HID Backspace (0x002a -> kVK_Delete trên macOS)
       // để bộ gõ tiếng Việt trên Mac xử lý xóa dấu/chữ chuẩn xác như bàn phím cứng
       inputModel.newKeyboardMode('', 0x002a, true, false);
@@ -493,7 +512,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   bool _trySendAsciiUsbHidKey(String char) {
-    if (char.length != 1 || _hasStickyMobileModifier || gFFI.ffiModel.isPeerAndroid) {
+    // HID keycodes are only correct for the US layout and only needed for
+    // macOS peers (Vietnamese IME). Other platforms/peers keep the legacy
+    // character-based inputKey path.
+    if (char.length != 1 ||
+        _hasStickyMobileModifier ||
+        gFFI.ffiModel.pi.platform != kPeerPlatformMacOS) {
       return false;
     }
     final int code = char.codeUnitAt(0);
@@ -1414,7 +1438,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 if (!virtualMouseMode.showVirtualMouse) {
                   inputModel.setRelativeMouseMode(false);
                 }
-                setState(() {});
+                if (mounted) setState(() {});
               },
             ),
             const Divider(
@@ -1424,7 +1448,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               value: virtualMouseMode.showVirtualScrollWheel,
               onChanged: (_) async {
                 await virtualMouseMode.toggleVirtualScrollWheel();
-                setState(() {});
+                if (mounted) setState(() {});
               },
             ),
             const Divider(
@@ -1437,7 +1461,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                     sessionId: sessionId, value: 'show-remote-cursor');
                 remoteCursorState.value = bind.sessionGetToggleOptionSync(
                     sessionId: sessionId, arg: 'show-remote-cursor');
-                setState(() {});
+                if (mounted) setState(() {});
               },
             ),
             const Divider(
@@ -1456,7 +1480,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               value: virtualMouseMode.showTouchVirtualMouse,
               onChanged: (_) async {
                 await virtualMouseMode.toggleTouchVirtualMouse();
-                setState(() {});
+                if (mounted) setState(() {});
               },
             ),
             if (virtualMouseMode.showTouchVirtualMouse)
@@ -1545,12 +1569,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             buildSwitchRow(
               title: 'Auto Lock Screen',
               leadingIcon: Icons.lock_outline_rounded,
-              value: bind.sessionGetToggleOptionSync(
-                  sessionId: sessionId, arg: 'lock-after-session-end'),
+              value:
+                  bind.mainGetLocalOption(key: _kAutoLockOnPauseOption) == 'Y',
               onChanged: (_) async {
-                await bind.sessionToggleOption(
-                    sessionId: sessionId, value: 'lock-after-session-end');
-                setState(() {});
+                final enabled =
+                    bind.mainGetLocalOption(key: _kAutoLockOnPauseOption) ==
+                        'Y';
+                await bind.mainSetLocalOption(
+                    key: _kAutoLockOnPauseOption, value: enabled ? 'N' : 'Y');
+                if (mounted) setState(() {});
               },
             ),
           ],
@@ -1629,7 +1656,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               if (!virtualMouseMode.showVirtualJoystick) {
                 inputModel.setRelativeMouseMode(false);
               }
-              setState(() {});
+              if (mounted) setState(() {});
             },
           ),
           if (virtualMouseMode.showVirtualJoystick) ...[
@@ -2118,10 +2145,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                     ? getBodyForDesktopWithListener()
                     : OrientationBuilder(builder: (ctx, orientation) {
                         if (_currentOrientation != orientation) {
-                          Timer(const Duration(milliseconds: 200), () {
+                          _currentOrientation = orientation;
+                          _orientationResetTimer?.cancel();
+                          _orientationResetTimer =
+                              Timer(const Duration(milliseconds: 200), () {
+                            if (!mounted) return;
                             gFFI.dialogManager
                                 .resetMobileActionsOverlay(ffi: gFFI);
-                            _currentOrientation = orientation;
                             gFFI.canvasModel.updateViewStyle();
                           });
                         }
@@ -2710,7 +2740,10 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 
     final fnRow = <Widget>[
       for (var i = 1; i <= 12; ++i)
-        wrap('F$i', () => inputModel.inputKey('VK_F$i')),
+        wrap('F$i', () {
+          if (gFFI.ffiModel.viewOnly) return;
+          inputModel.inputKey('VK_F$i');
+        }),
     ];
 
     Future.delayed(const Duration(milliseconds: 200), () {

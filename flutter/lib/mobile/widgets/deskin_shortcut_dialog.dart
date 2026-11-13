@@ -139,20 +139,33 @@ class DeskInShortcutRepository {
     }
   }
 
+  // Returns null when [decoded] is not a JSON list, so callers can fall back
+  // to defaults. A valid empty list is preserved (user cleared all shortcuts).
+  static List<DeskInShortcutItem>? tryParseItems(dynamic decoded) {
+    if (decoded is! List) return null;
+    final seenIds = <String>{};
+    final items = <DeskInShortcutItem>[];
+    for (final m in decoded.whereType<Map>()) {
+      try {
+        final item =
+            DeskInShortcutItem.fromJson(Map<String, dynamic>.from(m));
+        if (item.keys.isEmpty || !seenIds.add(item.id)) continue;
+        items.add(item);
+      } catch (_) {}
+    }
+    // A non-empty stored list that sanitizes to nothing is corrupt, not an
+    // intentional empty configuration; let the caller fall back to defaults.
+    if (items.isEmpty && decoded.isNotEmpty) return null;
+    return items;
+  }
+
   static List<DeskInShortcutItem> loadForOs(String osKey) {
     try {
       final raw = bind.mainGetLocalOption(key: _storageKey(osKey));
       if (raw.isNotEmpty) {
-        final decoded = jsonDecode(raw);
-        if (decoded is List) {
-          final items = decoded
-              .whereType<Map>()
-              .map((m) =>
-                  DeskInShortcutItem.fromJson(Map<String, dynamic>.from(m)))
-              .toList();
-          if (items.isNotEmpty) {
-            return items;
-          }
+        final items = tryParseItems(jsonDecode(raw));
+        if (items != null) {
+          return items;
         }
       }
     } catch (_) {}
@@ -198,6 +211,11 @@ void executeDeskInShortcut(
     onModifierToggled?.call();
     return;
   }
+
+  // Sticky modifiers only flip local input state, so they stay usable in
+  // view-only mode (an active modifier can still be cleared). Everything
+  // below sends input to the peer and must respect view-only/keyboard perms.
+  if (inputModel.isViewOnly || !ffi.ffiModel.keyboard) return;
 
   // Handle special system actions if present
   if (item.keys.length == 1 && item.keys[0] == 'ACTION_CTRL_ALT_DEL') {

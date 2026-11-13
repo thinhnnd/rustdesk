@@ -417,11 +417,12 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
   Offset _preSavedPos = Offset.zero;
 
   Offset _pointerDownGlobalPos = Offset.zero;
-  Timer? _holdClickTimer;
   Timer? _longPressHintTimer;
   bool _isMoveReady = false;
   bool _isDragging = false;
   bool _isSecondFingerDragging = false;
+  int? _activePointerId;
+  Future<void>? _pendingRemoteButtonOp;
 
   bool get _isLeft => widget.isLeft;
   InputModel get _inputModel => widget.inputModel;
@@ -441,7 +442,6 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
 
   @override
   void dispose() {
-    _holdClickTimer?.cancel();
     _longPressHintTimer?.cancel();
     if (identical(
         onSpecialHoldSecondFingerStart, _onSecondFingerStartedOnCanvas)) {
@@ -449,7 +449,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     }
     if (_remoteButtonDown) {
       _remoteButtonDown = false;
-      _inputModel.tapUp(_mouseBtn);
+      _runRemoteButtonOp(() => _inputModel.tapUp(_mouseBtn));
     }
     if (_isPressed) {
       isSpecialHoldDragActive = false;
@@ -463,9 +463,18 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     super.dispose();
   }
 
+  // Serialize remote button press/release so a tapUp can never overtake a
+  // still-pending tapDown (which would leave the remote button stuck down).
+  Future<void> _runRemoteButtonOp(Future<void> Function() op) {
+    final next = (_pendingRemoteButtonOp ?? Future<void>.value())
+        .then((_) => op())
+        .catchError((_) {});
+    _pendingRemoteButtonOp = next;
+    return next;
+  }
+
   void _onSecondFingerStartedOnCanvas() {
     if (!mounted || !_isPressed || _isDragging) return;
-    _holdClickTimer?.cancel();
     _longPressHintTimer?.cancel();
     _isSecondFingerDragging = true;
     if (_isMoveReady) {
@@ -475,10 +484,10 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     }
     if (!_remoteButtonDown) {
       _remoteButtonDown = true;
-      () async {
+      _runRemoteButtonOp(() async {
         await _cursorModel.syncCursorPosition();
         await _inputModel.tapDown(_mouseBtn);
-      }();
+      });
     }
   }
 
@@ -596,8 +605,9 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
   }
 
   void _handlePointerDown(PointerDownEvent event) {
+    if (_activePointerId != null) return;
+    _activePointerId = event.pointer;
     HapticFeedback.lightImpact();
-    _holdClickTimer?.cancel();
     _longPressHintTimer?.cancel();
     _pointerDownGlobalPos = event.position;
     _isDragging = false;
@@ -610,19 +620,6 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     setState(() {
       _isPressed = true;
     });
-
-    // Khi giữ nút L (chuột trái), tự động gửi tapDown sau 90ms để sẵn sàng
-    // cho thao tác tay phải di trên màn hình bôi đen văn bản / kéo thả (DeskIn style).
-    if (_isLeft) {
-      _holdClickTimer = Timer(const Duration(milliseconds: 90), () async {
-        if (!mounted || !_isPressed || _isDragging || _remoteButtonDown) {
-          return;
-        }
-        _remoteButtonDown = true;
-        await _cursorModel.syncCursorPosition();
-        await _inputModel.tapDown(_mouseBtn);
-      });
-    }
 
     // Sau 240ms nhấn giữ bằng 1 ngón (nếu chưa dùng ngón thứ 2 kéo trên canvas),
     // rung nhẹ báo hiệu có thể kéo di chuyển nút L hoặc R độc lập.
@@ -642,7 +639,12 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
   }
 
   void _handlePointerMove(PointerMoveEvent event) {
-    if (!_isPressed) return;
+    if (!_isPressed || event.pointer != _activePointerId) return;
+    // `_isSecondFingerDragging` only applies while the canvas pan is active;
+    // clear it once the canvas gesture has ended so the button can be moved again.
+    if (_isSecondFingerDragging && !isSpecialHoldDragCanvasMoving) {
+      _isSecondFingerDragging = false;
+    }
     if (_isSecondFingerDragging || isSpecialHoldDragCanvasMoving) {
       return;
     }
@@ -652,13 +654,12 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     if (_isDragging || dist > 8.0) {
       if (!_isDragging) {
         _isDragging = true;
-        _holdClickTimer?.cancel();
         _longPressHintTimer?.cancel();
         _cursorModel.blockEvents = true;
         isSpecialHoldDragActive = false;
         if (_remoteButtonDown) {
           _remoteButtonDown = false;
-          _inputModel.tapUp(_mouseBtn);
+          _runRemoteButtonOp(() => _inputModel.tapUp(_mouseBtn));
         }
         if (!_isMoveReady) {
           HapticFeedback.selectionClick();
@@ -671,8 +672,10 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     }
   }
 
-  Future<void> _handlePointerUpOrCancel({required bool isCancel}) async {
-    _holdClickTimer?.cancel();
+  Future<void> _handlePointerUpOrCancel(
+      {required bool isCancel, int? pointer}) async {
+    if (pointer != null && pointer != _activePointerId) return;
+    _activePointerId = null;
     _longPressHintTimer?.cancel();
     if (identical(
         onSpecialHoldSecondFingerStart, _onSecondFingerStartedOnCanvas)) {
@@ -701,12 +704,14 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     if (!wasPressed) return;
 
     if (wasRemoteDown) {
-      await _inputModel.tapUp(_mouseBtn);
+      await _runRemoteButtonOp(() => _inputModel.tapUp(_mouseBtn));
     } else if (!isCancel) {
-      await _cursorModel.syncCursorPosition();
-      await _inputModel.tapDown(_mouseBtn);
-      await Future.delayed(const Duration(milliseconds: 45));
-      await _inputModel.tapUp(_mouseBtn);
+      await _runRemoteButtonOp(() async {
+        await _cursorModel.syncCursorPosition();
+        await _inputModel.tapDown(_mouseBtn);
+        await Future.delayed(const Duration(milliseconds: 45));
+        await _inputModel.tapUp(_mouseBtn);
+      });
     }
   }
 
@@ -728,8 +733,10 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
           behavior: HitTestBehavior.opaque,
           onPointerDown: _handlePointerDown,
           onPointerMove: _handlePointerMove,
-          onPointerUp: (_) => _handlePointerUpOrCancel(isCancel: false),
-          onPointerCancel: (_) => _handlePointerUpOrCancel(isCancel: true),
+          onPointerUp: (e) =>
+              _handlePointerUpOrCancel(isCancel: false, pointer: e.pointer),
+          onPointerCancel: (e) =>
+              _handlePointerUpOrCancel(isCancel: true, pointer: e.pointer),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 90),
             width: _kLeftRightButtonWidth,
