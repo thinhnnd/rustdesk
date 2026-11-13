@@ -417,6 +417,12 @@ class InputModel {
   var alt = false;
   var command = false;
 
+  /// Names ('ctrl', 'alt', 'shift', 'command') of modifiers toggled on from
+  /// the on-screen DeskIn shortcut bar. They share the flags above but must
+  /// be told apart from hardware-held state, so a hardware flag stuck after
+  /// a lost key-up can be cleared without dropping intentional stickies.
+  final Set<String> touchModifiers = <String>{};
+
   final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
   final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
   late final _localFlutterShortcuts = LocalFlutterShortcutDispatcher(
@@ -1425,7 +1431,39 @@ class InputModel {
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
     shift = ctrl = alt = command = false;
+    touchModifiers.clear();
     if (parent.target?.closed == true) _localFlutterShortcuts.clear();
+  }
+
+  /// Clears modifier flags that are neither physically held nor toggled on
+  /// the on-screen shortcut bar. Hardware key-up events can be lost when an
+  /// app-switch combo takes focus away (for example Cmd+Tab), which leaves a
+  /// flag stuck on and turns every following [inputKey] call into a shortcut
+  /// on the peer instead of text.
+  void reconcileStaleModifiers() {
+    final keyboard = HardwareKeyboard.instance;
+    for (final name in staleNonTouchModifiers(
+      ctrl: ctrl,
+      alt: alt,
+      shift: shift,
+      command: command,
+      ctrlPressed: keyboard.isControlPressed,
+      altPressed: keyboard.isAltPressed,
+      shiftPressed: keyboard.isShiftPressed,
+      metaPressed: keyboard.isMetaPressed,
+      touchModifiers: touchModifiers,
+    )) {
+      switch (name) {
+        case 'ctrl':
+          ctrl = false;
+        case 'alt':
+          alt = false;
+        case 'shift':
+          shift = false;
+        case 'command':
+          command = false;
+      }
+    }
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.

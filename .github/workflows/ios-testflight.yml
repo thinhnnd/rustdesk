@@ -1,0 +1,352 @@
+# Build the iOS/iPadOS IPA and upload it to TestFlight.
+#
+# Rust core strategy: this branch ships a prebuilt Rust library at
+# `prebuilt/ios/liblibrustdesk.a.gz` (see run_ios.sh). When only Dart-side code
+# changed since PREBUILT_BASE the lib is reused (fast path, ~8 min). When Rust
+# sources changed, the pipeline rebuilds it from source: flutter_rust_bridge
+# codegen on Linux, then vcpkg + cargo on the macOS runner.
+# PREBUILT_BASE must be updated whenever the prebuilt lib is regenerated.
+#
+# One-time Apple-side setup (already done, kept here for reference):
+#   - App ID `com.thinhnnd.rustdesk` and app "RustDesk Gold" on App Store Connect
+#   - `iPhone Distribution` certificate (id FN4CUVRV47) exported to IOS_DIST_P12_BASE64
+#   - App Store provisioning profile `rustdesk-gold-app-store` in IOS_PROVISIONING_PROFILE_BASE64
+#   - App Store Connect API key in APP_STORE_CONNECT_*
+#
+# Manual signing is used (see Release build settings in flutter/ios and
+# flutter/ios/exportOptions.plist) so no Apple portal calls happen at build time.
+
+name: iOS TestFlight
+
+on:
+  push:
+    branches:
+      - master
+      - ci/ios-testflight
+  workflow_dispatch:
+
+concurrency:
+  group: ios-testflight-${{ github.ref }}
+  # Do not cancel: a late push killing an in-flight TestFlight upload wastes the
+  # whole run and can leave a partial upload in Apple's pipeline.
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.35.5"
+  BRIDGE_FLUTTER_VERSION: "3.22.3"
+  # Commit that produced prebuilt/ios/liblibrustdesk.a.gz. Update this when the
+  # prebuilt library is regenerated.
+  PREBUILT_BASE: "995dbd936eadd94f66fc0b4bf3315a804694833e"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_CMAKE_VERSION: "4.3.0"
+
+jobs:
+  # Decides whether the Rust core can come from prebuilt/ios/ or must be
+  # rebuilt because Rust-side sources changed after PREBUILT_BASE.
+  check-lib:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.diff.outputs.rust_changed }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for Rust-side changes
+        id: diff
+        run: |
+          CHANGED=$(git diff --name-only ${{ env.PREBUILT_BASE }} HEAD -- \
+            src/ libs/ Cargo.toml Cargo.lock build.rs res/vcpkg res/vcpkg-triplets vcpkg.json)
+          if [ -z "$CHANGED" ]; then
+            echo "rust_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Rust-side changes since PREBUILT_BASE:"
+            echo "$CHANGED"
+          fi
+
+  # Inline copy of the default (Flutter 3.22.3) leg of bridge.yml. The reusable
+  # workflow also builds a 3.44 bridge artifact for Windows arm64 that iOS never
+  # consumes, and its patch script can fail independently of this pipeline, so
+  # this job is kept self-contained.
+  generate-bridge:
+    needs: check-lib
+    if: needs.check-lib.outputs.rust_changed == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get install ca-certificates -y
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            gcc \
+            git \
+            g++ \
+            libclang-dev \
+            libgtk-3-dev \
+            llvm-dev \
+            nasm \
+            ninja-build \
+            pkg-config \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: bridge-ubuntu-22.04
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install flutter rust bridge deps
+        shell: bash
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features "uuid" --locked
+          # Downgrade extended_text so `flutter pub get` resolves under the old
+          # codegen SDK; codegen does not consume this package's API.
+          sed -i -E 's/^([[:space:]]*)extended_text:.*/\1extended_text: 13.0.0/' flutter/pubspec.yaml
+          rm -f flutter/pubspec.lock
+          pushd flutter && flutter pub get && popd
+
+      - name: Run flutter rust bridge
+        run: |
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bridge-artifact
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+            ./flutter/macos/Runner/bridge_generated.h
+            ./flutter/ios/Runner/bridge_generated.h
+
+  build-ios-testflight:
+    name: build and upload to TestFlight
+    needs: [check-lib, generate-bridge]
+    if: always() && needs.check-lib.result == 'success' && needs.generate-bridge.result != 'failure'
+    runs-on: macos-latest
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Unpack prebuilt Rust core
+        if: needs.check-lib.outputs.rust_changed != 'true'
+        run: |
+          mkdir -p target/aarch64-apple-ios/release
+          gunzip -c prebuilt/ios/liblibrustdesk.a.gz > target/aarch64-apple-ios/release/liblibrustdesk.a
+
+      - name: Install vcpkg build tools
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: brew install nasm yasm
+
+      - name: Setup vcpkg with Github Actions binary cache
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet arm64-ios \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install Rust toolchain
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        with:
+          prefix-key: rustdesk-lib-cache-ios
+          key: aarch64-apple-ios
+
+      - name: Restore bridge files
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Build rustdesk lib
+        if: needs.check-lib.outputs.rust_changed == 'true'
+        run: |
+          cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+
+      - name: Install flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Import the distribution certificate
+        uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+        with:
+          p12-file-base64: ${{ secrets.IOS_DIST_P12_BASE64 }}
+          p12-password: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          keychain: rustdesk
+
+      - name: Install the provisioning profile
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 -d > /tmp/app-store.mobileprovision
+          security cms -D -i /tmp/app-store.mobileprovision -o /tmp/app-store-profile.plist
+          PROFILE_UUID=$(plutil -extract UUID raw /tmp/app-store-profile.plist)
+          mv /tmp/app-store.mobileprovision "$PROFILE_DIR/$PROFILE_UUID.mobileprovision"
+          security default-keychain -s rustdesk.keychain
+          security find-identity -v
+
+      - name: Build and sign IPA
+        run: |
+          pushd flutter
+          flutter build ipa --release \
+            --build-number=${{ github.run_number }} \
+            --export-options-plist=ios/exportOptions.plist
+          popd
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_API_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
+          chmod 600 ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
+
+      - name: Upload to TestFlight
+        run: |
+          xcrun altool --upload-app \
+            --type ios \
+            --file flutter/build/ios/ipa/*.ipa \
+            --apiKey "${{ secrets.APP_STORE_CONNECT_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}"
+
+      - name: Distribute build to internal TestFlight group
+        run: |
+          python3 -m venv /tmp/ascenv
+          /tmp/ascenv/bin/pip install --quiet pyjwt cryptography
+          /tmp/ascenv/bin/python <<'PY'
+          import json, time, urllib.request
+          import jwt
+
+          APP_ID = "6833731204"
+          GROUP_ID = "c981bf7f-5e4e-4628-8ada-715e8f5e34e7"
+          BUILD_NUMBER = "${{ github.run_number }}"
+          BASE = "https://api.appstoreconnect.apple.com/v1"
+
+          def api(method, path, body=None):
+              token = jwt.encode(
+                  {"iss": "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}",
+                   "iat": int(time.time()), "exp": int(time.time()) + 900,
+                   "aud": "appstoreconnect-v1"},
+                  open(f"/Users/runner/private_keys/AuthKey_{key_id}.p8").read(),
+                  algorithm="ES256", headers={"kid": key_id})
+              req = urllib.request.Request(
+                  BASE + path, method=method,
+                  data=json.dumps(body).encode() if body else None,
+                  headers={"Authorization": f"Bearer {token}",
+                           "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.loads(r.read() or b"{}")
+              except urllib.error.HTTPError as e:
+                  return e.code, json.loads(e.read() or b"{}")
+
+          key_id = "${{ secrets.APP_STORE_CONNECT_KEY_ID }}"
+
+          # Poll the buildUploads endpoint: the upload is listed as soon as
+          # altool delivers it, and its state carries real errors on
+          # rejection. The `builds` resource only appears after Apple's
+          # processing finishes, which can take 45+ minutes.
+          build_id = None
+          for _ in range(45):
+              _, data = api("GET", f"/apps/{APP_ID}/buildUploads?limit=10")
+              for u in data.get("data", []):
+                  a = u["attributes"]
+                  if a.get("cfBundleVersion") != BUILD_NUMBER:
+                      continue
+                  state = a.get("state", {}).get("state")
+                  errors = a.get("state", {}).get("errors")
+                  if state == "FAILED" or errors:
+                      raise SystemExit(
+                          f"Build upload {u['id']} state: {state} {errors}")
+                  if state == "COMPLETE":
+                      build_id = u["id"]
+                  break
+              if build_id:
+                  break
+              time.sleep(60)
+          if not build_id:
+              raise SystemExit("Uploaded build still not processed by App Store Connect")
+
+          for _ in range(10):
+              status, _ = api(
+                  "POST", f"/betaGroups/{GROUP_ID}/relationships/builds",
+                  {"data": [{"type": "builds", "id": build_id}]})
+              if status in (200, 201, 204):
+                  print(f"Build {build_id} assigned to Internal Testers")
+                  break
+              time.sleep(20)
+          else:
+              raise SystemExit("Could not assign build to Internal Testers group")
+          PY
+
+      - name: Upload IPA artifact
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-ios-ipa
+          path: flutter/build/ios/ipa/*.ipa
+          if-no-files-found: ignore

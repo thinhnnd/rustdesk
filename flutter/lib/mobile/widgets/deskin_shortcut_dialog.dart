@@ -193,21 +193,33 @@ void executeDeskInShortcut(
   final inputModel = ffi.inputModel;
   if (item.isStickyCtrl) {
     inputModel.ctrl = !inputModel.ctrl;
+    inputModel.ctrl
+        ? inputModel.touchModifiers.add('ctrl')
+        : inputModel.touchModifiers.remove('ctrl');
     onModifierToggled?.call();
     return;
   }
   if (item.isStickyAlt) {
     inputModel.alt = !inputModel.alt;
+    inputModel.alt
+        ? inputModel.touchModifiers.add('alt')
+        : inputModel.touchModifiers.remove('alt');
     onModifierToggled?.call();
     return;
   }
   if (item.isStickyShift) {
     inputModel.shift = !inputModel.shift;
+    inputModel.shift
+        ? inputModel.touchModifiers.add('shift')
+        : inputModel.touchModifiers.remove('shift');
     onModifierToggled?.call();
     return;
   }
   if (item.isStickyCommand) {
     inputModel.command = !inputModel.command;
+    inputModel.command
+        ? inputModel.touchModifiers.add('command')
+        : inputModel.touchModifiers.remove('command');
     onModifierToggled?.call();
     return;
   }
